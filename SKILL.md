@@ -157,3 +157,29 @@ that audio and physical behavior still require listening on the DS.
 - Do not use Android, ADB, melonDS, or NO$GBA unless the project explicitly
   authorizes a distinct diagnostic workflow.
 - Do not claim physical audio or DS/DSi compatibility from emulation.
+
+## High-Performance 60 FPS Architectural Contracts
+
+The Nintendo DS ARM9 CPU (67 MHz) and memory bus require strict architectural
+discipline to achieve 60 FPS. Naive PC-style rendering (per-pixel loops, 16-bit
+software framebuffers, $O(N^2)$ simulation loops, unmanaged DMA) will fail to
+exceed 10-15 FPS.
+
+Before writing simulation, rendering, or memory management code, agents MUST
+consult:
+- **`references/performance-architecture.md`**: The canonical reference for
+  hardware budgets (545 ticks @ 60 FPS), D-cache coherency rules, and rendering
+  archetypes.
+
+### Game Archetype Catalog Overview
+1. **Archetype 1: 2D High-Entity Swarms & Software Framebuffers** (e.g. Tower Defense, RTS swarms):
+   - **VRAM Double-Buffering:** Use Main Engine `MODE_FB0`/`MODE_FB1` alternating Banks A & B for zero-cost page flips.
+   - **Native 8-bit Sub-Engine:** Use Sub-Engine Mode 5 (`BgType_Bmp8`) with hardware 256-color palette (`BG_PALETTE_SUB`) to cut DMA payload to 48 KB.
+   - **Direct 32-bit Quad Blitting:** Pad sprite rows to 4-byte boundaries; skip transparent quads in 1 cycle (`qval == 0`), store 4 opaque pixels in 1 instruction (`STR`).
+   - **8x8 Deduplicated Dirty Grid:** Never clear whole screens; restore only modified 8x8 blocks via burst `memcpy` from ground cache.
+   - **Cache Coherency:** Always call `DC_FlushRange()` before triggering DMA from Main RAM to VRAM. For RAM-to-RAM copies, use CPU `memcpy()`.
+   - **Spatial Partitioning:** Use uniform spatial grids to keep entity separation and hit tests at $O(N)$ instead of $O(N^2)$.
+2. **Archetype 2: 2D Hardware Tilemaps & OAM Sprites (Platformers, RPGs):**
+   - Utilize native hardware background scrolling engines and 128 hardware OAM sprites.
+3. **Archetype 3: 3D Fixed-Function Geometry (Racers, 3D Action):**
+   - Utilize geometry engine display lists, vertex packing, and dual 3D VRAM bank allocation.

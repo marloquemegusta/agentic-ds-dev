@@ -11,18 +11,19 @@ This skill is the complete DS development workflow. Use its bundled scripts,
 runtime, container image, templates, scenarios, and validators; do not ask the
 user to know DS toolchain commands.
 
-## Supported host and setup
+## Supported host and offline package
 
 - Supported host: Windows 10/11, PowerShell, plus Docker Desktop (normally with
   WSL2 integration) or Docker Engine and WSL2 installed separately. Docker is
-  the BlocksDS container backend; WSL2 runs the bundled DeSmuME/GDB runtime.
-- Run `scripts/setup.ps1` to automatically bootstrap the environment. It checks
-  prerequisites, downloads the headless DeSmuME runtime from GitHub Releases if
-  not present, and prepares the BlocksDS container image.
-- Run `scripts/check-toolchain.ps1` to verify whether Docker, WSL2, Python,
-  the BlocksDS image, and the DeSmuME runtime are ready.
-- If the offline BlocksDS image tar is available in `images/`, `scripts/load-blocksds-image.ps1`
-  loads it; otherwise it pulls `skylyrac/blocksds:slim-latest` from Docker Hub.
+  the offline BlocksDS container backend; WSL2 runs the bundled DeSmuME/GDB
+  runtime.
+- The package contains a pinned BlocksDS image at `images/blocksds-slim-latest.tar`,
+  a pinned headless DeSmuME runtime, its source and GDB overlay, runners, and
+  generic scenario contracts.
+- Run `scripts/check-toolchain.ps1` first. It reports whether Docker and WSL2,
+  Python, the BlocksDS image, and the DeSmuME runtime are available.
+- If the image is not loaded, use `scripts/load-blocksds-image.ps1`; do not
+  pull from the network during an offline run.
 - If Docker/WSL2 is missing, explain the host requirement and stop before making
   system changes.
 
@@ -88,6 +89,27 @@ For every observable behavior, require a host-side contract test and a real
 input scenario that performs the modified gesture. Read the manifest first,
 then events, logs, and relevant captures. A `PASS`, `screen_changed`, pixel
 difference, or screenshot hash alone never proves the hypothesis.
+
+### Mandatory controller-input preflight
+
+Before using `button_down` / `button_up` as evidence for a gameplay, menu, or
+pause behavior, validate the controller path against the current ROM. The
+runner's `desmume_input_keypad_get()` only proves that the emulator frontend
+accepted a bitmask; it does **not** prove that the ROM consumed that button via
+`scanKeys()` / `keysDown()`.
+
+Create or run a small project-owned input-contract scenario whose button press
+causes a uniquely observable, asserted state change in that ROM (for example a
+dedicated input-test screen, a mode label, or a menu transition). Do not reuse
+the generic `input-contract.template.json` as proof: it is illustrative and
+may name a different ROM. Inspect the before/after captures and assert the
+specific transition. If this preflight fails, classify all button-driven
+scenario results as invalid and diagnose the runtime/input boundary before
+changing game controls or adding touch-only workarounds.
+
+Touch needs the same treatment: use a capture that proves the intended hitbox
+was activated, not merely a changed screen. Account for the DS lower-screen
+coordinate space explicitly and include a release between independent taps.
 
 ### UX evidence loop
 

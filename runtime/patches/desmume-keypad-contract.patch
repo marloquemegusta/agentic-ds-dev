@@ -1,0 +1,120 @@
+diff --git a/desmume/src/frontend/interface/interface.cpp b/desmume/src/frontend/interface/interface.cpp
+index 19fcb10..a576e0f 100644
+--- a/desmume/src/frontend/interface/interface.cpp
++++ b/desmume/src/frontend/interface/interface.cpp
+@@ -62,11 +62,14 @@ std::wstring s2ws(const std::string& str)
+     return converter.from_bytes(str);
+ }
+ 
++u16 agent_keypad_state = 0;
++
+ EXPORTED int desmume_init()
+ {
+     NDS_Init();
+-    // TODO: Option to disable audio
+-    SPU_ChangeSoundCore(SNDCORE_SDL, 735 * 4);
++    // The agent is strictly headless. Keep the dummy core selected so a
++    // development run never touches the host audio device.
++    SPU_ChangeSoundCore(SNDCORE_DUMMY, 735 * 4);
+     SPU_SetSynchMode(0, 0);
+     SPU_SetVolume(100);
+     SNDSDLSetAudioVolume(100);
+@@ -137,7 +140,7 @@ EXPORTED void desmume_skip_next_frame()
+ 
+ EXPORTED void desmume_cycle(BOOL with_joystick)
+ {
+-    u16 keypad;
++    u16 keypad = agent_keypad_state;
+     /* Joystick events */
+     if (with_joystick) {
+         /* Retrieve old value: can use joysticks w/ another device (from our side) */
+@@ -148,13 +151,17 @@ EXPORTED void desmume_cycle(BOOL with_joystick)
+         update_keypad(keypad);
+     }
+ 
+-    NDS_beginProcessingInput();
+-    {
+-        FCEUMOV_AddInputState();
+-    }
+-    NDS_endProcessingInput();
+-
++    // Use DeSmuME's normal keypad path so the requested state reaches
++    // raw input, final input, and the emulated KEYINPUT register.
++    update_keypad(keypad);
++    // The exported ABI uses the hardware/libnds KEYINPUT bit layout.
++    // Reassert it at the frame boundary because ARM7 may refresh the
++    // peripheral while the frame is being executed.
++    HostWriteWord(MMU.ARM9_REG, 0x130, (u16)~keypad);
++    HostWriteWord(MMU.ARM7_REG, 0x130, (u16)~keypad);
+     NDS_exec<false>();
++    HostWriteWord(MMU.ARM9_REG, 0x130, (u16)~keypad);
++    HostWriteWord(MMU.ARM7_REG, 0x130, (u16)~keypad);
+     SPU_Emulate_user();
+ }
+ 
+@@ -582,6 +589,7 @@ EXPORTED void desmume_input_joy_set_key(int index, int joystick_key_index)
+ 
+ EXPORTED void desmume_input_keypad_update(u16 keys)
+ {
++    agent_keypad_state = keys;
+     update_keypad(keys);
+ }
+ 
+@@ -590,6 +598,7 @@ EXPORTED u16 desmume_input_keypad_get(void)
+     return get_keypad();
+ }
+ 
++
+ EXPORTED void desmume_input_set_touch_pos(u16 x, u16 y)
+ {
+     NDS_setTouchPos(x, y);
+diff --git "a/C:\\codexlocal\\desmume-upstream\\desmume\\src\\MMU.h" "b/C:\\Users\\malfonso\\.codex\\skills\\ds-game-dev\\runtime\\source\\desmume\\src\\MMU.h"
+index 9088563..444d871 100644
+--- "a/C:\\codexlocal\\desmume-upstream\\desmume\\src\\MMU.h"
++++ "b/C:\\Users\\malfonso\\.codex\\skills\\ds-game-dev\\runtime\\source\\desmume\\src\\MMU.h"
+@@ -692,6 +692,15 @@ FORCEINLINE void CheckMemoryDebugEvent(EDEBUG_EVENT event, const MMU_ACCESS_TYPE
+ 	}
+ }
+ 
++// Headless input ABI state. ARM9's inline memory path must see the same
++// keypad mask as the exported frontend API; it otherwise bypasses MMU.cpp's
++// register readers and returns the stale backing array.
++extern u16 agent_keypad_state;
++FORCEINLINE u16 agent_keyinput_value_inline()
++{
++	return (u16)(~agent_keypad_state & 0x03FF);
++}
++
+ 
+ //ALERT!!!!!!!!!!!!!!
+ //the following inline functions dont do the 0x0FFFFFFF mask.
+@@ -700,6 +709,9 @@ FORCEINLINE void CheckMemoryDebugEvent(EDEBUG_EVENT event, const MMU_ACCESS_TYPE
+ FORCEINLINE u8 _MMU_read08(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u32 addr)
+ {
+ 	CheckMemoryDebugEvent(DEBUG_EVENT_READ,AT,PROCNUM,addr,8,0);
++	if(PROCNUM == ARMCPU_ARM9 && (addr & 0x0FFFFFFF) == 0x04000130) {
++		return (u8)agent_keyinput_value_inline();
++	}
+ 
+ 	//special handling to un-protect the ARM7 bios during debug reading
+ 	if(PROCNUM == ARMCPU_ARM7 && AT == MMU_AT_DEBUG && addr<0x00004000)
+@@ -748,6 +760,9 @@ FORCEINLINE u8 _MMU_read08(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u3
+ FORCEINLINE u16 _MMU_read16(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u32 addr) 
+ {
+ 	CheckMemoryDebugEvent(DEBUG_EVENT_READ,AT,PROCNUM,addr,16,0);
++	if(PROCNUM == ARMCPU_ARM9 && (addr & 0x0FFFFFFF) == 0x04000130) {
++		return agent_keyinput_value_inline();
++	}
+ 
+ 	//special handling to un-protect the ARM7 bios during debug reading
+ 	if(PROCNUM == ARMCPU_ARM7 && AT == MMU_AT_DEBUG && addr<0x00004000)
+@@ -809,6 +824,9 @@ dunno:
+ FORCEINLINE u32 _MMU_read32(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u32 addr)
+ {
+ 	CheckMemoryDebugEvent(DEBUG_EVENT_READ,AT,PROCNUM,addr,32,0);
++	if(PROCNUM == ARMCPU_ARM9 && (addr & 0x0FFFFFFF) == 0x04000130) {
++		return (u32)agent_keyinput_value_inline();
++	}
+ 
+ 	//special handling to un-protect the ARM7 bios during debug reading
+ 	if(PROCNUM == ARMCPU_ARM7 && AT == MMU_AT_DEBUG && addr<0x00004000)

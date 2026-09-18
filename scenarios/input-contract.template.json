@@ -1,5 +1,5 @@
 {
-  "rom": "ds-stylophone.nds",
+  "rom": "<ROM supplied with -RomPath>",
   "steps": [
     {"frames": 300, "capture": "before"},
     {"button_down": "START", "frames": 2},

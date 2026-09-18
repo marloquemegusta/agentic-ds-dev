@@ -81,7 +81,7 @@ def main() -> int:
     scenario_path = Path(sys.argv[2])
     output = Path(sys.argv[3])
     lib_path = Path(sys.argv[4])
-    scenario = json.loads(scenario_path.read_text(encoding="utf-8-sig"))
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
     output.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     os.environ.setdefault("SDL_AUDIODRIVER", "dummy")

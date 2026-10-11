@@ -19,14 +19,14 @@ The Nintendo DS features an ARM946E-S application processor clocked at 67.028 MH
 
 ---
 
-## 2. Hardware Performance Budget (The 60 FPS Golden Rule)
+## 2. Hardware Performance Budget (Planning target, not a guarantee)
 
 ### ARM9 Frame Budget
-Under the standard hardware configuration, Timer 0 configured with `ClockDivider_1024` gives:
-$$\text{Timer Frequency} = \frac{33.514\text{ MHz}}{1024} \approx 32,728\text{ Hz}$$
-$$\text{Frame Budget @ 60 FPS} = \frac{32,728}{60} = \mathbf{545\text{ ticks}}.$$
+At the DS native refresh rate of about 59.826 Hz, a frame lasts about 16.715 ms. At exactly 60 Hz it lasts 16.667 ms. Timer 0 at `BUS_CLOCK / 1024` therefore represents roughly 547 ticks per native-refresh frame or 545 ticks at exactly 60 Hz. These are timer ticks, not ARM9 CPU cycles. Keep timer ticks, bus cycles, and CPU cycles labeled separately, and state which interval each profiler measures.
 
-### Golden Subsystem Budget Breakdown (545 ticks total)
+The subsystem figures below are one conservative allocation for a 60 Hz high-entity framebuffer workload. They are a starting point for profiling, not a universal budget or a guarantee that a game will reach 60 FPS. Different rendering paths, audio/interrupt load, and hardware contention change the usable margin.
+
+### Example Subsystem Allocation (545 timer ticks at 60 Hz)
 | Subsystem Phase | Target Budget (60 FPS) | Description |
 | :--- | :--- | :--- |
 | **S (Simulation & Logic)** | $\le 100$ ticks | Movement, pathfinding, spatial hash, and combat. |
@@ -70,7 +70,7 @@ DMA controllers on the Nintendo DS bypass the ARM9 cache and read **directly fro
    dmaCopyWords(1, g_top_backbuffer, s_top_vram, SCREEN_W * SCREEN_H);
    ```
 2. **RAM-to-RAM Transfers:**
-   For copying data between two Main RAM buffers (e.g., ground cache to screen backbuffer), **always use CPU `memcpy()`** rather than DMA. CPU `memcpy` operates inside the cache, executes at full 32-bit burst speed, and guarantees 100% data coherency without cache flushes.
+   Choose CPU `memcpy()` or DMA from measurements on the target workload. Cached `memcpy()` can win for small or moderate transfers; DMA can suit larger aligned blocks but has setup, bus, and cache-coherency costs. Do not assume either path wins. Prefer removing full-frame copies through hardware scrolling, tile streaming, or direct rendering when those fit the game.
 
 ---
 
@@ -150,8 +150,8 @@ DMA controllers on the Nintendo DS bypass the ARM9 cache and read **directly fro
 
 ## 6. Verification and Telemetry Standards
 
-Every high-performance DS project must implement deterministic telemetry:
-1. **Timer 0 Subsystem Profiler:** Measure elapsed ticks across simulation, background restore, entity blit, and DMA presentation.
-2. **Compact HUD Metric String:** Render instantaneous and 1-second rolling averages on-screen:
-   `FPS:60 T:482 B:24 P:48 S:45 E:128`
-3. **Automated Stress Scenarios:** Include stress scenarios in `scenarios/` with maximum entity populations to verify that frame time does not exceed 545 ticks.
+Use deterministic telemetry when profiling: measure simulation, background restore/streaming, entity composition, DMA/VRAM writes, and presentation waits separately. Label units and the work included in each counter; do not add overlapping counters or count VBlank wait as CPU work.
+
+HUD values and stress limits are examples that must be calibrated to the renderer and device. A 545-tick target corresponds to an exact 60 Hz interval with Timer 0 at `BUS_CLOCK / 1024`; DS native refresh is about 59.826 Hz (~547 ticks). Preserve headroom for audio, interrupts, and transfer variance.
+
+Use DeSmuME for reproducible input scenarios and relative comparisons. It does not certify physical timing. Validate the exact candidate ROM on the target DS/DSi before making a console-performance claim; if hardware is unavailable, mark the result unverified.

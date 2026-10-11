@@ -177,14 +177,28 @@ or synthetic frame compositors) outside the compiled binary is strictly prohibit
 Evidence must always reflect the actual ARM9 C engine, simulation physics, particles,
 and rendering pipeline.
 
+## Performance optimization workflow
+
+- Measure the exact ROM on the target DS/DSi before editing. Record its CRC/SHA-256, device, scene, repeatable inputs, FPS, and each counter's start/end semantics.
+- Split frame cost by stage: simulation, background/tile streaming, sprite or bitmap composition, DMA/VRAM writes, and presentation/VBlank wait. Identify the dominant cost before choosing an architecture.
+- Run controlled A/B changes one path at a time, using the same ROM workload and gameplay assertions. Compare timing and behavior: movement, collision, visibility, actor order, and controls must remain correct.
+- Choose a renderer for the actual content and VRAM layout. For static scrolling scenery, compare hardware BG/tilemap scrolling and viewport-bounded caches with full-screen copies. Treat framebuffer or dirty-grid techniques from another game as candidates, not defaults.
+- Stress world sizes and edge cases: camera boundaries, two-axis scrolling, first load, camera jumps, cache eviction, atlas IDs, metadata growth, and worst-case VBlank transfers. Budget total RAM/VRAM, not only the resident cache.
+
+## Performance profiling and physical hardware
+
+- DeSmuME is useful for repeatable scenarios and relative A/B comparisons, but emulator FPS and timing do not certify DS/DSi performance; memory-bus, DMA, and VRAM costs can differ on hardware.
+- For a physical claim, run the exact identified ROM on the target device with repeatable idle, sustained-movement, and busiest-scene workloads. Record device, ROM CRC/SHA-256, FPS, and in-game stage counters.
+- Distinguish active work from waits, including VBlank/presentation wait. If hardware is unavailable, report emulator results as emulator-only and leave physical performance unverified.
+
 ## 60 FPS Performance Architecture & Hardware Budgets
 
-All game systems targeting the Nintendo DS must strictly adhere to its hardware budgets to guarantee 60 FPS (59.826 Hz):
+Use these constraints as design targets. A 60 FPS claim requires measurement on the target hardware; architecture rules alone do not guarantee a frame rate.
 
 1. **Hardware Budget:**
-   - 1 frame = **16.71 ms** = **560,190 ARM9 CPU cycles** (@ 67.028 MHz) = **280,095 ticks** (Timer 0 @ 33.514 MHz BUS_CLOCK) or **545 ticks** with ClockDivider_1024.
+   - 1 frame at 59.826 Hz is **16.715 ms** ≈ **1.12 million ARM9 cycles** (@ 67.028 MHz) ≈ **560,190 BUS_CLOCK cycles** (@ 33.514 MHz) ≈ **547 Timer 0 ticks** with ClockDivider_1024; at exactly 60 Hz the corresponding timer budget is about **545 ticks**. Keep CPU cycles, bus cycles, and timer ticks distinct.
    - Total scanlines = 263 (lines 0..191 active display, lines 192..262 VBlank).
-   - CPU rendering and simulation must complete before scanline 192 (`REG_VCOUNT < 192`) to avoid dropping to 30 FPS.
+   - Meet the frame/presentation deadline with enough margin for interrupts and display work. `REG_VCOUNT` indicates scanline position; it is useful telemetry, not by itself a universal proof of frame rate.
 
 2. **Prohibition of Unaccelerated Full-Screen 16-bit Software Framebuffers:**
    - The ARM9 lacks an FPU and the 16-bit EWRAM bus has severe bandwidth limits.

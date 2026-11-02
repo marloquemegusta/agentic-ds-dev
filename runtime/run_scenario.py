@@ -37,6 +37,13 @@ BUTTON_BITS = {
 LEGACY_MAP = Path(".ds-game-dev") / "build" / "build" / "game-blocksds.map"
 DELTA_KEYS = ("min_abs_delta", "min_delta", "max_delta", "max_abs_delta")
 VALUE_KEYS = ("equals", "min_value", "max_value")
+# Every key a step may carry. Anything else is a typo or an action from a
+# project fork; failing on it avoids a silently skipped action passing a test.
+STEP_KEYS = {
+    "button_down", "button_up", "release_flush_frames", "tap", "touch", "tap_grid",
+    "drag", "release", "frames", "capture", "capture_sequence", "capture_every",
+    "state_capture", "comment", "note",
+}
 
 
 def log(message: str) -> None:
@@ -75,6 +82,21 @@ def button_bit(name: str) -> int:
         return BUTTON_BITS[name.upper()]
     except KeyError as error:
         raise ValueError(f"unknown button: {name}") from error
+
+
+def validate_scenario(scenario: dict) -> None:
+    """Reject malformed scenarios before the emulator starts."""
+    steps = scenario.get("steps")
+    if not isinstance(steps, list):
+        raise ValueError("scenario.steps must be a list")
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise ValueError(f"step {index} must be an object")
+        unknown = sorted(set(step) - STEP_KEYS)
+        if unknown:
+            raise ValueError(f"step {index}: unknown keys {unknown}")
+    if not isinstance(scenario.get("assertions", {}), dict):
+        raise ValueError("scenario.assertions must be an object")
 
 
 def capture(lib, path: Path) -> tuple[str, bytes]:
@@ -204,6 +226,7 @@ def run(rom: Path, scenario_path: Path, output: Path, lib_path: Path,
     frame = 0  # emulated frames cycled so far
 
     scenario = json.loads(scenario_path.read_text(encoding="utf-8-sig"))
+    validate_scenario(scenario)
     output.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -258,6 +281,33 @@ def run(rom: Path, scenario_path: Path, output: Path, lib_path: Path,
                 point = step["tap"] if "tap" in step else step["touch"]
                 lib.desmume_input_set_touch_pos(point["x"], point["y"])
                 event(index, "tap", x=point["x"], y=point["y"])
+            if "tap_grid" in step:
+                # Tap a grid of points one after another, optionally holding
+                # buttons during each tap (e.g. a modifier that turns a tap
+                # into a spawn). Each tap lasts hold_frames, then gap_frames
+                # with the touch released; both count as emulated frames.
+                grid = step["tap_grid"]
+                count = max(0, int(grid["count"]))
+                columns = max(1, int(grid.get("columns", count or 1)))
+                hold = 0
+                for name in grid.get("hold", []):
+                    hold |= button_bit(name)
+                hold_frames = max(1, int(grid.get("hold_frames", 2)))
+                gap_frames = max(0, int(grid.get("gap_frames", 1)))
+                base = keypad
+                for n in range(count):
+                    x = int(grid["x"]) + (n % columns) * int(grid.get("spacing_x", 0))
+                    y = int(grid["y"]) + (n // columns) * int(grid.get("spacing_y", 0))
+                    lib.desmume_input_set_touch_pos(max(0, min(WIDTH - 1, x)), max(0, min(191, y)))
+                    keypad = base | hold
+                    for _ in range(hold_frames):
+                        cycle()
+                    keypad = base
+                    lib.desmume_input_release_touch()
+                    for _ in range(gap_frames):
+                        cycle()
+                event(index, "tap_grid", count=count, columns=columns, hold=grid.get("hold", []),
+                      hold_frames=hold_frames, gap_frames=gap_frames)
             if "drag" in step:
                 drag = step["drag"]
                 start = drag["from"]

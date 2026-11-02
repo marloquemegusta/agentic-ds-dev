@@ -71,8 +71,11 @@ product decision.
 
 Use `scripts/build-project.ps1 -ProjectPath <repo>`. It reads the project's
 `.ds-game-dev/project.json`, loads the bundled BlocksDS image, copies the
-declared source/assets into an isolated build tree, runs `make`, and writes the
-requested ROM output.
+declared source/assets into an isolated build tree, runs `make -j`, and writes the
+requested ROM output. The build is incremental: only changed files are copied
+and recompiled (a no-change build takes ~2-3 s). The tree is rebuilt from
+scratch automatically when the template, `project.json` or the image change,
+or a source file is deleted; pass `-Clean` to force it.
 
 Run the host test commands declared in `project.json` with
 `scripts/run-host-tests.ps1` before and after the change. A build passing is

@@ -48,7 +48,7 @@ Verify that all tools and runtimes are operational:
 | `.\scripts\setup.ps1` | Bootstraps headless DeSmuME binaries from Releases & prepares BlocksDS Docker image. |
 | `.\scripts\check-toolchain.ps1` | Verifies WSL2, Docker, Python, BlocksDS container, and DeSmuME runtime status. |
 | `.\scripts\scaffold-project.ps1 -ProjectPath <path>` | Scaffolds a new standard DS homebrew project layout. |
-| `.\scripts\build-project.ps1 -ProjectPath <path>` | Builds the Nintendo DS ROM (`.nds`) using BlocksDS. |
+| `.\scripts\build-project.ps1 -ProjectPath <path>` | Builds the Nintendo DS ROM (`.nds`) using BlocksDS, incrementally (`-Clean` forces a full rebuild). |
 | `.\scripts\run-scenario.ps1 -RomPath <rom> -ScenarioPath <scenario> -OutputPath <out>` | Runs a deterministic headless test scenario with touch/buttons and collects PNG captures. |
 | `.\scripts\validate-gdb.ps1 -RomPath <rom>` | Spawns DeSmuME with ARM9 GDB stub and validates register reads and breakpoints. |
 | `.\scripts\upload-rom.ps1 -ProjectPath <path> -RomPath <rom>` | Uploads the built ROM to physical hardware over FTP. |

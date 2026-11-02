@@ -113,8 +113,13 @@ def map_symbol_address(map_path: Path, symbol: str) -> int:
     raise ValueError(f"symbol {symbol!r} not found in {map_path}")
 
 
-def resolve_map_path(state_config: dict, scenario_path: Path, cli_map: str | None) -> Path:
-    """scenario state.map > CLI arg / DS_MAP_PATH env > legacy default."""
+def resolve_map_path(state_config: dict, scenario_path: Path, cli_map: str | None,
+                     rom: Path) -> Path:
+    """scenario state.map > CLI arg / DS_MAP_PATH env > default build map.
+
+    The default is looked up next to the ROM first (build-project.ps1 drops
+    the ROM in the project root), then next to the scenario's parent dir.
+    """
     scenario_dir = scenario_path.parent
     if "map" in state_config:
         return (scenario_dir / state_config["map"]).resolve()
@@ -124,7 +129,8 @@ def resolve_map_path(state_config: dict, scenario_path: Path, cli_map: str | Non
         return Path(cli_map)
     if os.environ.get("DS_MAP_PATH"):
         return Path(os.environ["DS_MAP_PATH"])
-    return (scenario_dir.parent / LEGACY_MAP).resolve()
+    candidates = [(rom.parent / LEGACY_MAP).resolve(), (scenario_dir.parent / LEGACY_MAP).resolve()]
+    return next((path for path in candidates if path.exists()), candidates[0])
 
 
 def read_state(lib, bases: dict, fields: dict, default_symbol: str) -> dict:
@@ -213,7 +219,7 @@ def run(rom: Path, scenario_path: Path, output: Path, lib_path: Path,
         state_bases = {}
         default_symbol = "state"
         if state_config:
-            map_path = resolve_map_path(state_config, scenario_path, cli_map)
+            map_path = resolve_map_path(state_config, scenario_path, cli_map, rom)
             ctx["map_path"] = str(map_path)
             symbols = state_config["symbols"] if "symbols" in state_config else {"state": state_config["symbol"]}
             state_bases = {name: map_symbol_address(map_path, symbol) for name, symbol in symbols.items()}

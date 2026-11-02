@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string]$ProjectPath,
     [Parameter(Mandatory)] [string]$RomPath,

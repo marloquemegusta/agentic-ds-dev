@@ -1,4 +1,4 @@
-param([ValidateSet('Wsl','Docker')][string]$Backend = 'Wsl')
+﻿param([ValidateSet('Wsl','Docker')][string]$Backend = 'Wsl')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $root 'runtime\source'

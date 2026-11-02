@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory)] [string]$RomPath,
     [Parameter(Mandatory)] [string]$ScenarioPath,
     [Parameter(Mandatory)] [string]$OutputPath,

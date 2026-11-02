@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([Parameter(Mandatory)][string]$RomPath, [int]$Port = 24710, [string]$BreakpointAddress = '0x02000804')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot

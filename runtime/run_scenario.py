@@ -180,22 +180,21 @@ def check_state_assertion(samples: dict, assertion: dict) -> dict:
         before = samples[assertion["from"]][field]
         after = samples[assertion["to"]][field]
         delta = after - before
-    if "min_abs_delta" in assertion:
-        passed = abs(delta) >= int(assertion["min_abs_delta"])
-    elif "min_delta" in assertion:
-        passed = delta >= int(assertion["min_delta"])
-    elif "max_delta" in assertion:
-        passed = delta <= int(assertion["max_delta"])
-    elif "max_abs_delta" in assertion:
-        passed = abs(delta) <= int(assertion["max_abs_delta"])
-    elif "equals" in assertion:
-        passed = after == int(assertion["equals"])
-    elif "min_value" in assertion:
-        passed = after >= int(assertion["min_value"])
-    elif "max_value" in assertion:
-        passed = after <= int(assertion["max_value"])
-    else:
+    # Every check present must hold, so a range like min_value + max_value is
+    # enforced on both ends instead of only the first key found.
+    checks = {
+        "min_abs_delta": lambda limit: abs(delta) >= limit,
+        "min_delta": lambda limit: delta >= limit,
+        "max_delta": lambda limit: delta <= limit,
+        "max_abs_delta": lambda limit: abs(delta) <= limit,
+        "equals": lambda expected: after == expected,
+        "min_value": lambda limit: after >= limit,
+        "max_value": lambda limit: after <= limit,
+    }
+    present = [key for key in checks if key in assertion]
+    if not present:
         raise ValueError(f"unsupported state assertion: {assertion}")
+    passed = all(checks[key](int(assertion[key])) for key in present)
     result = {"field": field, "after": after, "passed": passed}
     if "at" in assertion:
         result["at"] = assertion["at"]

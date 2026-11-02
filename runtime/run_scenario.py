@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run deterministic DS input scenarios against the headless DeSmuME ABI."""
+"""Run deterministic DS input scenarios against the headless DeSmuME ABI.
+
+usage: run_scenario.py ROM.nds SCENARIO.json OUTPUT_DIR LIBRARY.so [MAP_FILE]
+
+See references/scenario-format.md for the scenario JSON format.
+"""
 
 import ctypes
 import hashlib
@@ -28,6 +33,14 @@ BUTTON_BITS = {
     "X": 1 << 10,
     "Y": 1 << 11,
 }
+# Backward-compatible map location used by older projects.
+LEGACY_MAP = Path(".ds-game-dev") / "build" / "build" / "game-blocksds.map"
+DELTA_KEYS = ("min_abs_delta", "min_delta", "max_delta", "max_abs_delta")
+VALUE_KEYS = ("equals", "min_value", "max_value")
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
 
 
 def png_bytes(rgb: bytes) -> bytes:
@@ -52,17 +65,16 @@ def configure(lib):
     lib.desmume_input_release_touch.argtypes = []
     lib.desmume_input_keypad_update.argtypes = [ctypes.c_uint16]
     lib.desmume_input_keypad_get.restype = ctypes.c_uint16
+    lib.desmume_memory_read_long.argtypes = [ctypes.c_uint32]
+    lib.desmume_memory_read_long.restype = ctypes.c_uint32
     lib.desmume_free.argtypes = []
 
 
-def set_button(lib, keypad: int, name: str, pressed: bool) -> int:
+def button_bit(name: str) -> int:
     try:
-        bit = BUTTON_BITS[name.upper()]
+        return BUTTON_BITS[name.upper()]
     except KeyError as error:
         raise ValueError(f"unknown button: {name}") from error
-    keypad = keypad | bit if pressed else keypad & ~bit
-    lib.desmume_input_keypad_update(keypad)
-    return keypad
 
 
 def capture(lib, path: Path) -> tuple[str, bytes]:
@@ -73,71 +85,218 @@ def capture(lib, path: Path) -> tuple[str, bytes]:
     return hashlib.sha256(rgb).hexdigest(), rgb
 
 
-def main() -> int:
-    if len(sys.argv) != 5:
-        print("usage: run_scenario.py ROM.nds SCENARIO.json OUTPUT_DIR LIBRARY.so", file=sys.stderr)
-        return 2
-    rom = Path(sys.argv[1])
-    scenario_path = Path(sys.argv[2])
-    output = Path(sys.argv[3])
-    lib_path = Path(sys.argv[4])
-    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+# ---------------------------------------------------------------- state ----
+
+def map_symbol_address(map_path: Path, symbol: str) -> int:
+    """Resolve a linked symbol address from a GNU ld map file.
+
+    Looks for an input-section line (.bss.NAME / .data.NAME / .rodata.NAME);
+    the address is on the same line or on the following one. Falls back to the
+    global symbol table lines ("0xADDR   NAME").
+    """
+    sections = {f".{kind}.{symbol}" for kind in ("bss", "data", "rodata")}
+    lines = map_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for index, line in enumerate(lines):
+        fields = line.split()
+        if not fields or fields[0] not in sections:
+            continue
+        if len(fields) >= 2 and fields[1].startswith("0x"):
+            return int(fields[1], 16)
+        if index + 1 < len(lines):
+            nxt = lines[index + 1].split()
+            if nxt and nxt[0].startswith("0x"):
+                return int(nxt[0], 16)
+    for line in lines:
+        fields = line.split()
+        if len(fields) == 2 and fields[0].startswith("0x") and fields[1] == symbol:
+            return int(fields[0], 16)
+    raise ValueError(f"symbol {symbol!r} not found in {map_path}")
+
+
+def resolve_map_path(state_config: dict, scenario_path: Path, cli_map: str | None) -> Path:
+    """scenario state.map > CLI arg / DS_MAP_PATH env > legacy default."""
+    scenario_dir = scenario_path.parent
+    if "map" in state_config:
+        return (scenario_dir / state_config["map"]).resolve()
+    if "map_path" in state_config:  # legacy key, relative to the scenario's parent dir
+        return (scenario_dir.parent / state_config["map_path"]).resolve()
+    if cli_map:
+        return Path(cli_map)
+    if os.environ.get("DS_MAP_PATH"):
+        return Path(os.environ["DS_MAP_PATH"])
+    return (scenario_dir.parent / LEGACY_MAP).resolve()
+
+
+def read_state(lib, bases: dict, fields: dict, default_symbol: str) -> dict:
+    values = {}
+    for name, spec in fields.items():
+        if isinstance(spec, dict):
+            symbol, offset = spec["symbol"], spec["offset"]
+        else:
+            symbol, offset = default_symbol, spec
+        value = int(lib.desmume_memory_read_long(bases[symbol] + int(offset)))
+        values[name] = value - 0x100000000 if value & 0x80000000 else value
+    return values
+
+
+def check_state_assertion(samples: dict, assertion: dict) -> dict:
+    field = assertion["field"]
+    is_delta = any(key in assertion for key in DELTA_KEYS)
+    if "at" in assertion:
+        before = None
+        after = samples[assertion["at"]][field]
+        delta = None
+        if is_delta:
+            raise ValueError(f"delta checks need from/to, not 'at': {assertion}")
+    else:
+        before = samples[assertion["from"]][field]
+        after = samples[assertion["to"]][field]
+        delta = after - before
+    if "min_abs_delta" in assertion:
+        passed = abs(delta) >= int(assertion["min_abs_delta"])
+    elif "min_delta" in assertion:
+        passed = delta >= int(assertion["min_delta"])
+    elif "max_delta" in assertion:
+        passed = delta <= int(assertion["max_delta"])
+    elif "max_abs_delta" in assertion:
+        passed = abs(delta) <= int(assertion["max_abs_delta"])
+    elif "equals" in assertion:
+        passed = after == int(assertion["equals"])
+    elif "min_value" in assertion:
+        passed = after >= int(assertion["min_value"])
+    elif "max_value" in assertion:
+        passed = after <= int(assertion["max_value"])
+    else:
+        raise ValueError(f"unsupported state assertion: {assertion}")
+    result = {"field": field, "after": after, "passed": passed}
+    if "at" in assertion:
+        result["at"] = assertion["at"]
+    else:
+        result.update({"from": assertion["from"], "to": assertion["to"],
+                       "before": before, "delta": delta})
+    for key in DELTA_KEYS + VALUE_KEYS:
+        if key in assertion:
+            result[key] = assertion[key]
+    return result
+
+
+def state_label(result: dict) -> str:
+    where = result["at"] if "at" in result else f"{result['from']}->{result['to']}"
+    return f"state:{where}.{result['field']}"
+
+
+# ----------------------------------------------------------------- main ----
+
+def run(rom: Path, scenario_path: Path, output: Path, lib_path: Path,
+        cli_map: str | None, ctx: dict) -> bool:
+    """Execute the scenario. Fills ctx (events, captures, ...); returns pass/fail."""
+    events = ctx["events"]
+    captures = ctx["captures"]
+    capture_pixels = {}
+    state_samples = ctx["state_samples"]
+    sequences = ctx["sequences"]
+    frame = 0  # emulated frames cycled so far
+
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8-sig"))
     output.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
     os.environ.setdefault("ALSOFT_DRIVERS", "null")
     lib = ctypes.CDLL(str(lib_path))
     configure(lib)
-    if lib.desmume_init() != 0 or lib.desmume_open(str(rom).encode()) != 1:
-        raise RuntimeError("DeSmuME failed to initialize or open ROM")
-    lib.desmume_resume()
-
-    events = []
-    captures = {}
-    capture_pixels = {}
-    keypad = 0
     try:
+        if lib.desmume_init() != 0 or lib.desmume_open(str(rom).encode()) != 1:
+            raise RuntimeError("DeSmuME failed to initialize or open ROM")
+        lib.desmume_resume()
+
+        state_config = scenario.get("state")
+        state_bases = {}
+        default_symbol = "state"
+        if state_config:
+            map_path = resolve_map_path(state_config, scenario_path, cli_map)
+            ctx["map_path"] = str(map_path)
+            symbols = state_config["symbols"] if "symbols" in state_config else {"state": state_config["symbol"]}
+            state_bases = {name: map_symbol_address(map_path, symbol) for name, symbol in symbols.items()}
+            default_symbol = state_config.get("default_symbol", "state")
+
+        keypad = 0
+
+        def cycle() -> None:
+            nonlocal frame
+            lib.desmume_input_keypad_update(keypad)  # re-assert held buttons every frame
+            lib.desmume_cycle(0)
+            frame += 1
+
+        def event(index: int, action: str, **fields) -> None:
+            events.append({"step": index, "frame": frame, "action": action, **fields})
+
         for index, step in enumerate(scenario["steps"]):
             if "button_down" in step:
-                keypad = set_button(lib, keypad, step["button_down"], True)
-                events.append({"step": index, "action": "button_down", "button": step["button_down"]})
+                keypad |= button_bit(step["button_down"])
+                lib.desmume_input_keypad_update(keypad)
+                event(index, "button_down", button=step["button_down"], keypad=keypad)
             if "button_up" in step:
-                keypad = set_button(lib, keypad, step["button_up"], False)
-                events.append({"step": index, "action": "button_up", "button": step["button_up"]})
-            if "tap" in step:
-                point = step["tap"]
+                # Clear only this button; every other held button stays in the
+                # mask and is re-asserted on each frame. The patched runtime
+                # applies the mask to KEYINPUT on the next cycle, so no extra
+                # flush is needed by default. "release_flush_frames" requests
+                # extra frames (counted in the frame budget and logged).
+                keypad &= ~button_bit(step["button_up"])
+                lib.desmume_input_keypad_update(keypad)
+                flush = max(0, int(step.get("release_flush_frames", 0)))
+                for _ in range(flush):
+                    cycle()
+                event(index, "button_up", button=step["button_up"], keypad=keypad,
+                      flush_frames=flush)
+            if "tap" in step or "touch" in step:
+                point = step["tap"] if "tap" in step else step["touch"]
                 lib.desmume_input_set_touch_pos(point["x"], point["y"])
-                events.append({"step": index, "action": "tap", "x": point["x"], "y": point["y"]})
+                event(index, "tap", x=point["x"], y=point["y"])
             if "drag" in step:
                 drag = step["drag"]
                 start = drag["from"]
                 end = drag["to"]
                 drag_frames = max(1, int(drag.get("frames", 1)))
-                for frame in range(drag_frames):
-                    ratio = frame / max(1, drag_frames - 1)
+                for n in range(drag_frames):
+                    ratio = n / max(1, drag_frames - 1)
                     x = round(start["x"] + (end["x"] - start["x"]) * ratio)
                     y = round(start["y"] + (end["y"] - start["y"]) * ratio)
                     lib.desmume_input_set_touch_pos(x, y)
-                    lib.desmume_cycle(0)
-                events.append({"step": index, "action": "drag", "from": start, "to": end,
-                               "frames": drag_frames})
+                    cycle()
+                event(index, "drag", **{"from": start, "to": end, "frames": drag_frames})
             if "release" in step:
                 lib.desmume_input_release_touch()
-                events.append({"step": index, "action": "release"})
-            for _ in range(step.get("frames", 1)):
-                lib.desmume_cycle(0)
-            events.append({"step": index, "action": "frame_advance", "frames": step.get("frames", 1),
-                           "keypad": int(lib.desmume_input_keypad_get())})
+                event(index, "release")
+
+            frames = int(step.get("frames", 1))
+            seq_name = step.get("capture_sequence")
+            every = max(1, int(step.get("capture_every", 1)))
+            for n in range(frames):
+                cycle()
+                if seq_name and n % every == 0:
+                    count = sequences.get(seq_name, 0)
+                    capture(lib, output / f"{seq_name}_{count:04d}.png")
+                    sequences[seq_name] = count + 1
+            event(index, "frame_advance", frames=frames, keypad=int(lib.desmume_input_keypad_get()))
             if "capture" in step:
                 name = step["capture"]
-                digest, _ = capture(lib, output / f"{name}.png")
+                digest, pixels = capture(lib, output / f"{name}.png")
                 captures[name] = {"sha256": digest, "path": f"{name}.png"}
-                capture_pixels[name] = _
+                capture_pixels[name] = pixels
+            if "state_capture" in step:
+                if not state_config:
+                    raise ValueError("state_capture requires scenario.state")
+                name = step["state_capture"]
+                state_samples[name] = read_state(lib, state_bases, state_config["fields"], default_symbol)
+                event(index, "state_capture", name=name, state=state_samples[name])
+        ctx["frames"] = frame
     finally:
         lib.desmume_free()
 
-    assertions = scenario["assertions"]
-    checks = assertions.get("screen_changes", [assertions["screen_changed"]])
+    assertions = scenario.get("assertions") or {}
+    checks = assertions.get("screen_changes")
+    if checks is None:
+        checks = [assertions["screen_changed"]] if "screen_changed" in assertions else []
     screen_results = []
     for check in checks:
         first = captures[check["from"]]
@@ -151,25 +310,72 @@ def main() -> int:
             "changed": first["sha256"] != second["sha256"] and changed_pixels >= min_changed,
             "changed_pixels": changed_pixels, "min_changed_pixels": min_changed,
         })
-    changed = all(result["changed"] for result in screen_results)
-    first_result = screen_results[0]
-    manifest = {
-        "scenario": scenario_path.name,
-        "captures": captures,
-        "events": events,
-        "assertions": {"screen_changed": changed,
-                        "changed_pixels": first_result["changed_pixels"],
-                        "min_changed_pixels": first_result["min_changed_pixels"],
-                        "screen_changes": screen_results},
-    }
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    with (output / "events.jsonl").open("w", encoding="utf-8") as handle:
-        for event in events:
-            handle.write(json.dumps(event, separators=(",", ":")) + "\n")
-    if not changed:
-        print("DSM_SCENARIO_RESULT=FAIL reason=screen_unchanged")
+    state_results = [check_state_assertion(state_samples, check)
+                     for check in assertions.get("state_changes", [])]
+    screen_ok = all(r["changed"] for r in screen_results)
+    state_ok = all(r["passed"] for r in state_results)
+    summary = {"screen_changed": screen_ok, "screen_changes": screen_results,
+               "state_changed": state_ok, "state_changes": state_results}
+    if screen_results:
+        summary["changed_pixels"] = screen_results[0]["changed_pixels"]
+        summary["min_changed_pixels"] = screen_results[0]["min_changed_pixels"]
+    ctx["assertions"] = summary
+    ctx["failed"] = ([f"screen:{r['from']}->{r['to']}" for r in screen_results if not r["changed"]] +
+                     [state_label(r) for r in state_results if not r["passed"]])
+    if not screen_results and not state_results:
+        ctx["warnings"].append("no_assertions")
+        log("DSM_SCENARIO_WARNING=no_assertions")
+    return not ctx["failed"]
+
+
+def main() -> int:
+    if len(sys.argv) not in (5, 6):
+        print("usage: run_scenario.py ROM.nds SCENARIO.json OUTPUT_DIR LIBRARY.so [MAP_FILE]",
+              file=sys.stderr)
+        return 2
+    rom = Path(sys.argv[1])
+    scenario_path = Path(sys.argv[2])
+    output = Path(sys.argv[3])
+    lib_path = Path(sys.argv[4])
+    cli_map = sys.argv[5] if len(sys.argv) == 6 and sys.argv[5] else None
+    ctx = {"events": [], "captures": {}, "state_samples": {}, "sequences": {},
+           "warnings": [], "assertions": {}, "failed": [], "frames": 0, "error": None}
+    ok = False
+    try:
+        ok = run(rom, scenario_path, output, lib_path, cli_map, ctx)
+    except Exception as error:  # manifest must be written even on failure
+        ctx["error"] = f"{type(error).__name__}: {error}"
+        print(f"DSM_SCENARIO_ERROR={ctx['error']}", file=sys.stderr, flush=True)
+    finally:
+        try:
+            output.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "scenario": scenario_path.name,
+                "captures": ctx["captures"],
+                "capture_sequences": ctx["sequences"],
+                "events": ctx["events"],
+                "frames": ctx["frames"],
+                "assertions": ctx["assertions"],
+                "state_samples": ctx["state_samples"],
+                "warnings": ctx["warnings"],
+                "error": ctx["error"],
+            }
+            if "map_path" in ctx:
+                manifest["map_path"] = ctx["map_path"]
+            (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            with (output / "events.jsonl").open("w", encoding="utf-8") as handle:
+                for item in ctx["events"]:
+                    handle.write(json.dumps(item, separators=(",", ":")) + "\n")
+        except OSError as error:
+            print(f"DSM_SCENARIO_ERROR=cannot write manifest: {error}", file=sys.stderr, flush=True)
+    if ctx["error"]:
+        log("DSM_SCENARIO_RESULT=FAIL reason=exception")
         return 1
-    print(f"DSM_SCENARIO_RESULT=PASS captures={len(captures)} events={len(events)}")
+    if not ok:
+        log("DSM_SCENARIO_RESULT=FAIL reason=assertion_failed failed=" + ",".join(ctx["failed"]))
+        return 1
+    log(f"DSM_SCENARIO_RESULT=PASS captures={len(ctx['captures'])} events={len(ctx['events'])}"
+        f" frames={ctx['frames']}")
     return 0
 
 

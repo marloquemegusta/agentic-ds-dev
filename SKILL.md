@@ -85,6 +85,14 @@ and an output directory under `artifacts/`. Scenarios support `tap`, explicit
 `release`, `button_down`, `button_up`, `drag`, frame counts, captures, event
 traces, state assertions, and targeted visual assertions.
 
+Scenarios can read game memory: a `state` block maps names to offsets of a linked
+symbol (resolved from the linker `.map`; pass `-MapPath` or set `DS_MAP_PATH`),
+`state_capture` samples it, and `assertions.state_changes` checks deltas
+(`min_abs_delta`, `min_delta`, ...) or absolute values (`at` + `equals`,
+`min_value`, `max_value`). `capture_sequence`/`capture_every` save filmstrips.
+A scenario with no assertions passes with `DSM_SCENARIO_WARNING=no_assertions`;
+do not treat that as evidence. Full format: `references/scenario-format.md`.
+
 For every observable behavior, require a host-side contract test and a real
 input scenario that performs the modified gesture. Read the manifest first,
 then events, logs, and relevant captures. A `PASS`, `screen_changed`, pixel

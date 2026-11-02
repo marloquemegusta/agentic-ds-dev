@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory)] [string]$RomPath,
     [Parameter(Mandatory)] [string]$ScenarioPath,
-    [Parameter(Mandatory)] [string]$OutputPath
+    [Parameter(Mandatory)] [string]$OutputPath,
+    [string]$MapPath
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -16,6 +17,17 @@ function WslPath([string]$path) {
     return "/mnt/$($resolved.Substring(0,1).ToLowerInvariant())$($resolved.Substring(2).Replace('\','/'))"
 }
 $log = Join-Path $OutputPath 'emulator.log'
-& wsl python3 (WslPath $runner) (WslPath $RomPath) (WslPath $ScenarioPath) (WslPath $OutputPath) (WslPath $library) 2>&1 | Tee-Object -FilePath $log
-if ($LASTEXITCODE -ne 0) { throw 'El escenario DeSmuME falló.' }
-Write-Output "DS_SCENARIO_RESULT=PASS output=$OutputPath"
+$wslArgs = @('python3', '-u', (WslPath $runner), (WslPath $RomPath), (WslPath $ScenarioPath), (WslPath $OutputPath), (WslPath $library))
+if ($MapPath) { $wslArgs += (WslPath $MapPath) }
+# Windows PowerShell 5.1 turns native stderr into terminating errors under
+# 'Stop'; relax it only around the native call and restore it afterwards.
+$previousPreference = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & wsl @wslArgs 2>&1 | Tee-Object -FilePath $log
+    $exitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousPreference
+}
+if ($exitCode -ne 0) { throw "El escenario DeSmuME falló (exit $exitCode). Ver $log" }
+Write-Output "DSM_SCENARIO_RESULT=PASS output=$OutputPath"

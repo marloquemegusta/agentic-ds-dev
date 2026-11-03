@@ -188,60 +188,108 @@ or synthetic frame compositors) outside the compiled binary is strictly prohibit
 Evidence must always reflect the actual ARM9 C engine, simulation physics, particles,
 and rendering pipeline.
 
-## Performance optimization workflow
+## Performance: measure on the DS, compare in the emulator
 
-- Measure the exact ROM on the target DS/DSi before editing. Record its CRC/SHA-256, device, scene, repeatable inputs, FPS, and each counter's start/end semantics.
-- Split frame cost by stage: simulation, background/tile streaming, sprite or bitmap composition, DMA/VRAM writes, and presentation/VBlank wait. Identify the dominant cost before choosing an architecture.
-- Run controlled A/B changes one path at a time, using the same ROM workload and gameplay assertions. Compare timing and behavior: movement, collision, visibility, actor order, and controls must remain correct.
-- Choose a renderer for the actual content and VRAM layout. For static scrolling scenery, compare hardware BG/tilemap scrolling and viewport-bounded caches with full-screen copies. Treat framebuffer or dirty-grid techniques from another game as candidates, not defaults.
-- Stress world sizes and edge cases: camera boundaries, two-axis scrolling, first load, camera jumps, cache eviction, atlas IDs, metadata growth, and worst-case VBlank transfers. Budget total RAM/VRAM, not only the resident cache.
+DeSmuME is for repeatable behavior and relative A/B comparisons only. Its
+frame timing does not certify DS/DSi performance: memory-bus, DMA, and VRAM
+costs differ on hardware, and a frame that looks cheap in the emulator can blow
+the budget on the console. Never report "60 FPS" from emulator numbers.
 
-## Performance profiling and physical hardware
+### Budget (one frame at 59.826 Hz = 16.715 ms)
 
-- DeSmuME is useful for repeatable scenarios and relative A/B comparisons, but emulator FPS and timing do not certify DS/DSi performance; memory-bus, DMA, and VRAM costs can differ on hardware.
-- For a physical claim, run the exact identified ROM on the target device with repeatable idle, sustained-movement, and busiest-scene workloads. Record device, ROM CRC/SHA-256, FPS, and in-game stage counters.
-- Distinguish active work from waits, including VBlank/presentation wait. If hardware is unavailable, report emulator results as emulator-only and leave physical performance unverified.
+| Counter | Units per frame |
+| :--- | :--- |
+| ARM9 CPU cycles (67.028 MHz) | ~1,120,000 |
+| `cpuGetTiming()` / BUS_CLOCK ticks (33.514 MHz) | **560,190** |
+| Timer at `ClockDivider_1024` | ~547 (545 at exactly 60 Hz) |
 
-## 60 FPS Performance Architecture & Hardware Budgets
+Always name the counter with the number; 33,514 bus ticks is 1 ms, not a frame.
+There are 263 scanlines (0..191 visible, 192..262 VBlank); work may continue
+during VBlank, so `REG_VCOUNT` is telemetry, not a deadline.
 
-Use these constraints as design targets. A 60 FPS claim requires measurement on the target hardware; architecture rules alone do not guarantee a frame rate.
+### Hardware profiling loop
 
-1. **Hardware Budget:**
-   - 1 frame at 59.826 Hz is **16.715 ms** ≈ **1.12 million ARM9 cycles** (@ 67.028 MHz) ≈ **560,190 BUS_CLOCK cycles** (@ 33.514 MHz) ≈ **547 Timer 0 ticks** with ClockDivider_1024; at exactly 60 Hz the corresponding timer budget is about **545 ticks**. Keep CPU cycles, bus cycles, and timer ticks distinct.
-   - Total scanlines = 263 (lines 0..191 active display, lines 192..262 VBlank).
-   - Meet the frame/presentation deadline with enough margin for interrupts and display work. `REG_VCOUNT` indicates scanline position; it is useful telemetry, not by itself a universal proof of frame rate.
+1. Measure the exact ROM on the target device before editing. Split frame cost
+   by stage (simulation, BG/tile streaming, sprite or bitmap composition,
+   DMA/VRAM writes, VBlank wait) with `cpuStartTiming`/`cpuGetTiming`, and have
+   the ROM append per-window averages, maxima and frames-over-one-VBlank to a
+   log on the SD card behind a compile-time flag that is off by default.
+2. Build, upload (see "DS upload"), and ask the user to play the specific
+   repeatable situation (idle, sustained movement, busiest scene).
+3. Download the log with
+   `scripts/fetch-device-log.ps1 -ProjectPath <repo> -RemoteFile /<game>_perf.log`
+   (`-Delete` removes it afterwards; ask first). The same script reads crash
+   reports the ROM writes to the SD card.
+4. Run controlled A/B changes one path at a time with the same workload, and
+   check that movement, collision, visibility, actor order and controls stay
+   correct. Record device, ROM identity, and the counters' start/end semantics.
 
-2. **Prohibition of Unaccelerated Full-Screen 16-bit Software Framebuffers:**
-   - The ARM9 lacks an FPU and the 16-bit EWRAM bus has severe bandwidth limits.
-   - Never rasterize full-screen 16-bit bitmaps (256×192 = 49,152 pixels) on both screens every frame via software loops without hardware delegation or dirty caching.
+If hardware is unavailable, report results as emulator-only and leave physical
+performance unverified.
 
-3. **Core Rendering Rules:**
-   - **Hardware BG Layers for Backgrounds:** Delegate tilemap drawing and scrolling to the 2D hardware GPU (BG0..BG3 in Mode 0/1/2/5). Scrolling via registers (`REG_BGxHOFS`/`VOFS`) costs **0 CPU cycles**.
-   - **Hardware OAM for Sprites:** Use the 128 hardware sprite entries for dynamic characters, enemies, projectiles, and hazards. Hardware compositing and transparency cost **0 CPU cycles**.
-   - **Pre-Baking Static Shadows & World Elements:** Static object shadows (walls, pillars) must be pre-composited into the world cache once at startup (`floor_cache_build`), never evaluated in real-time loops.
-   - **Zero-Copy Double Buffering:** When using framebuffer modes (`MODE_FB0`/`MODE_FB1`), render directly into the offscreen VRAM bank (`VRAM_A` / `VRAM_B`) and flip the hardware register on VBlank. Never render to EWRAM and DMA copy the full screen when VRAM page flipping is available.
-   - **Zero Software Division in Hot Loops:** The ARM9 lacks a hardware divide instruction. Never divide (`/`) in inner rendering loops; use bit shifts (`>>`), fixed-point multiplications, or precomputed Look-Up Tables (LUTs).
-   - **32-Bit Memory Transfers & Hardware Alignment:** Use 32-bit aligned words (`uint32_t`) or `memcpy`/DMA to utilize the ARM9 `ldmia`/`stmia` burst engine. **CRITICAL:** The ARM946E-S does NOT support unaligned 32-bit memory access (an unaligned `LDR` performs a hardware rotation by 16 bits swapping halfwords; an unaligned `STR` writes to `addr & ~3` overwriting previous pixels). Always access unaligned pixel data as clean 16-bit halfwords (`uint16_t`).
+### Architecture rules (design targets, not guarantees)
+
+- **Floating point:** the ARM9 has no FPU; `float`/`double` work through
+  soft-float and are far too slow for per-frame game code. Use fixed point.
+- **Division:** the ARM9 has a hardware divider and square root
+  (`div32`/`mod32`/`sqrt32` in libnds). C `/` and `%` in hot loops still go
+  through a slower library call: prefer shifts, reciprocal LUTs, or the hardware
+  divider explicitly.
+- **Backgrounds:** delegate scrolling scenery to hardware BG layers. Register
+  scrolling is nearly free, but map/tile streaming and VRAM writes are not.
+- **Sprites:** OAM gives 128 hardware sprites with free compositing, but
+  `oamUpdate` costs time, sprites per scanline are limited, and there are only
+  32 affine matrices.
+- **Framebuffers:** never rasterize full-screen 16-bit bitmaps on both screens
+  every frame in software without dirty tracking. `MODE_FB0`/`MODE_FB1` show a
+  raw VRAM bank and disable BG, sprites and 3D on that screen; with a bitmap BG,
+  draw straight into the back page in VRAM instead of copying a whole screen
+  from main RAM.
+- **Static work:** pre-bake static shadows and world elements once at load.
+- **Alignment:** the ARM946E-S does not fix up unaligned 32-bit access. An
+  unaligned `LDR` returns the aligned word rotated by `8 * (addr & 3)` bits and an
+  unaligned `STR` writes to `addr & ~3`. Access unaligned pixel data as 16-bit
+  halfwords; use aligned words, `memcpy` or DMA for bulk transfers.
+- **Cache coherency:** call `DC_FlushRange()` on the source before DMA from main
+  RAM, and `DC_InvalidateRange()` on the destination before the CPU reads memory
+  that DMA wrote to main RAM.
+- **Code placement:** BlocksDS builds ARM9 code as Thumb by default; mark hot
+  inner loops `__attribute__((target("arm")))` and consider ITCM/DTCM.
+
+Archetype-specific patterns (high-entity framebuffers, tilemap + OAM games,
+3D geometry) and an example subsystem allocation are in
+`references/performance-architecture.md`. Read it before writing rendering,
+simulation, or memory-management code.
 
 ## GDB and runtime diagnostics
 
 Use `scripts/validate-gdb.ps1 -RomPath <rom>` only for a concrete diagnostic hypothesis. The
 runtime exposes ARM9 GDB remote debugging; it does not prove source-level
-symbols, audio, physical timing, or hardware compatibility.
+symbols, audio, physical timing, or hardware compatibility. For crashes that
+only happen on hardware, have the ROM write a crash report to the SD card and
+read it with `scripts/fetch-device-log.ps1`.
 
 ## DS upload
 
 Build and validation do not upload automatically. Upload only after explicit
 user confirmation immediately before the external mutation. Use
-`scripts/upload-rom.ps1 -ProjectPath <repo> -RomPath <rom> -ConfirmUpload`.
+`scripts/upload-rom.ps1 -ProjectPath <worktree> -RomPath <rom> -ConfirmUpload`.
 
-The skill provides default FTP settings without a password. Project-local
-overrides may be supplied through an ignored config file. On connection or
-verification failure, do not retry blindly: report the exact failure and ask
-the user to validate the IP, port, path, and device availability.
+- FTP settings resolve from the skill's `config/ftp.json`, then the project's
+  `.ds-game-dev/project.json` (`romUploadName`), then an optional gitignored
+  `.ds-game-dev/ftp.local.json`, then explicit parameters. Do not pass
+  `-RemoteName` unless the user asks: the project's name is the file the user
+  opens on the console.
+- The script refuses a ROM older than the project's sources (`ROM_STALE`),
+  warns when the ROM is outside `-ProjectPath`, checks the port first
+  (`FTP_UNREACHABLE` means the DS is not running its FTP server), and verifies
+  the remote size.
+- On failure, do not retry blindly: report the exact failure and ask the user
+  to open the FTP server on the DS or validate IP, port and path.
 
-After upload, report the ROM path, commit/build identity, remote target, and
-that audio and physical behavior still require listening on the DS.
+After upload, report the remote file, size, branch and commit from
+`FTP_UPLOAD_RESULT`, what the user should look for to recognize the new build,
+and that audio and physical behavior still require testing on the DS.
 
 ## Boundaries
 
@@ -250,32 +298,9 @@ that audio and physical behavior still require listening on the DS.
 - Implementation invariants come from `TECHNICAL.md`.
 - Worktrees, branches, commits, merge permission, and repository ownership come
   from the project's `AGENTS.md`.
+- Changes to this skill go on a branch of the skill repository (for example a
+  sibling worktree `agentic-ds-dev.wt-<name>`), never on its `main` checkout
+  while other sessions may be using it.
 - Do not use Android, ADB, melonDS, or NO$GBA unless the project explicitly
   authorizes a distinct diagnostic workflow.
 - Do not claim physical audio or DS/DSi compatibility from emulation.
-
-## High-Performance 60 FPS Architectural Contracts
-
-The Nintendo DS ARM9 CPU (67 MHz) and memory bus require strict architectural
-discipline to achieve 60 FPS. Naive PC-style rendering (per-pixel loops, 16-bit
-software framebuffers, $O(N^2)$ simulation loops, unmanaged DMA) will fail to
-exceed 10-15 FPS.
-
-Before writing simulation, rendering, or memory management code, agents MUST
-consult:
-- **`references/performance-architecture.md`**: The canonical reference for
-  hardware budgets (545 ticks @ 60 FPS), D-cache coherency rules, and rendering
-  archetypes.
-
-### Game Archetype Catalog Overview
-1. **Archetype 1: 2D High-Entity Swarms & Software Framebuffers** (e.g. Tower Defense, RTS swarms):
-   - **VRAM Double-Buffering:** Use Main Engine `MODE_FB0`/`MODE_FB1` alternating Banks A & B for zero-cost page flips.
-   - **Native 8-bit Sub-Engine:** Use Sub-Engine Mode 5 (`BgType_Bmp8`) with hardware 256-color palette (`BG_PALETTE_SUB`) to cut DMA payload to 48 KB.
-   - **Direct 32-bit Quad Blitting:** Pad sprite rows to 4-byte boundaries; skip transparent quads in 1 cycle (`qval == 0`), store 4 opaque pixels in 1 instruction (`STR`).
-   - **8x8 Deduplicated Dirty Grid:** Never clear whole screens; restore only modified 8x8 blocks via burst `memcpy` from ground cache.
-   - **Cache Coherency:** Always call `DC_FlushRange()` before triggering DMA from Main RAM to VRAM. For RAM-to-RAM copies, use CPU `memcpy()`.
-   - **Spatial Partitioning:** Use uniform spatial grids to keep entity separation and hit tests at $O(N)$ instead of $O(N^2)$.
-2. **Archetype 2: 2D Hardware Tilemaps & OAM Sprites (Platformers, RPGs):**
-   - Utilize native hardware background scrolling engines and 128 hardware OAM sprites.
-3. **Archetype 3: 3D Fixed-Function Geometry (Racers, 3D Action):**
-   - Utilize geometry engine display lists, vertex packing, and dual 3D VRAM bank allocation.

@@ -51,7 +51,8 @@ Verify that all tools and runtimes are operational:
 | `.\scripts\build-project.ps1 -ProjectPath <path>` | Builds the Nintendo DS ROM (`.nds`) using BlocksDS, incrementally (`-Clean` forces a full rebuild). |
 | `.\scripts\run-scenario.ps1 -RomPath <rom> -ScenarioPath <scenario> -OutputPath <out>` | Runs a deterministic headless test scenario with touch/buttons and collects PNG captures. |
 | `.\scripts\validate-gdb.ps1 -RomPath <rom>` | Spawns DeSmuME with ARM9 GDB stub and validates register reads and breakpoints. |
-| `.\scripts\upload-rom.ps1 -ProjectPath <path> -RomPath <rom>` | Uploads the built ROM to physical hardware over FTP. |
+| `.\scripts\upload-rom.ps1 -ProjectPath <path> -RomPath <rom> -ConfirmUpload` | Uploads the built ROM over FTP with the project's `romUploadName`; refuses stale ROMs and checks the port first. |
+| `.\scripts\fetch-device-log.ps1 -ProjectPath <path> -RemoteFile /<file>.log` | Downloads a log the ROM wrote to the SD card (profiling, crash reports) into `artifacts/device-logs/`. |
 
 ---
 

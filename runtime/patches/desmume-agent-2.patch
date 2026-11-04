@@ -1,0 +1,212 @@
+diff --git a/desmume/src/MMU.cpp b/desmume/src/MMU.cpp
+index a33d9f79..1bc5b08e 100644
+--- a/desmume/src/MMU.cpp
++++ b/desmume/src/MMU.cpp
+@@ -2472,9 +2472,17 @@ static INLINE void write_auxspicnt(const int PROCNUM, const int size, const int
+ 	//printf("MMU%c: cnt %04X, old %04X\n", PROCNUM?'7':'9', MMU.AUX_SPI_CNT, oldCnt);
+ }
+ 
++#ifdef TARGET_INTERFACE
++extern bool agent_nocash_write(int procnum, u32 addr, u32 size, u32 val);
++#endif
++
+ template <u8 PROCNUM>
+ bool validateIORegsWrite(u32 addr, u8 size, u32 val)
+ {
++#ifdef TARGET_INTERFACE
++	// no$gba debug registers (0x04FFFA00..0x04FFFA3F): captured by the agent
++	if (((addr & 0x0FFFFFC0) == 0x04FFFA00) && agent_nocash_write(PROCNUM, addr, size, val)) return false;
++#endif
+ 	if (PROCNUM == ARMCPU_ARM9)
+ 	{
+ 		u32 addrMasked = addr & 0x0FFFFFFC;
+diff --git a/desmume/src/frontend/interface/interface.cpp b/desmume/src/frontend/interface/interface.cpp
+index a576e0f6..7553b565 100644
+--- a/desmume/src/frontend/interface/interface.cpp
++++ b/desmume/src/frontend/interface/interface.cpp
+@@ -31,6 +31,7 @@
+ #include "../../mc.h"
+ #include "../../firmware.h"
+ #include "../../armcpu.h"
++#include "../../arm_jit.h"
+ #include "../posix/shared/sndsdl.h"
+ #include "../posix/shared/ctrlssdl.h"
+ #include <locale>
+@@ -697,3 +698,124 @@ EXPORTED void desmume_movie_stop()
+ {
+     FCEUI_StopMovie();
+ }
++
++
++// ---------------------------------------------------------------------------
++// Agent additions (overlay agent-2)
++// ---------------------------------------------------------------------------
++bool agent_rtc_fixed = true;
++
++EXPORTED const char* desmume_agent_version(void)
++{
++    return "agent-2";
++}
++
++EXPORTED void desmume_agent_set_rtc_fixed(int enabled)
++{
++    agent_rtc_fixed = enabled != 0;
++}
++
++EXPORTED void desmume_agent_set_jit(int enabled)
++{
++#ifdef HAVE_JIT
++    bool on = enabled != 0;
++    arm_jit_sync();
++    CommonSettings.use_jit = on;
++    arm_jit_reset(on);
++#else
++    (void)enabled;
++#endif
++}
++
++// no$gba debug output capture ------------------------------------------------
++static const size_t AGENT_DBG_CAP = 64 * 1024;
++static char agent_dbg_ring[AGENT_DBG_CAP];
++static size_t agent_dbg_head = 0;
++static size_t agent_dbg_len = 0;
++
++static void agent_dbg_push(const char* s, size_t n)
++{
++    for (size_t i = 0; i < n; i++) {
++        if (agent_dbg_len == AGENT_DBG_CAP) {
++            agent_dbg_head = (agent_dbg_head + 1) % AGENT_DBG_CAP;
++            agent_dbg_len--;
++        }
++        agent_dbg_ring[(agent_dbg_head + agent_dbg_len) % AGENT_DBG_CAP] = s[i];
++        agent_dbg_len++;
++    }
++}
++
++EXPORTED int desmume_agent_debug_read(char* buf, int cap)
++{
++    if (buf == NULL || cap <= 0) return 0;
++    size_t n = agent_dbg_len;
++    if (n > (size_t)(cap - 1)) n = (size_t)(cap - 1);
++    for (size_t i = 0; i < n; i++)
++        buf[i] = agent_dbg_ring[(agent_dbg_head + i) % AGENT_DBG_CAP];
++    buf[n] = 0;
++    agent_dbg_head = (agent_dbg_head + n) % AGENT_DBG_CAP;
++    agent_dbg_len -= n;
++    return (int)n;
++}
++
++// Expands the no$gba %param% subset that makes sense without a debugger:
++// %r0%..%r15%, %sp%, %lr%, %pc%, %frame%, %scanline%, %%. Unknown tokens are
++// passed through verbatim.
++static void agent_dbg_expand(int procnum, const std::string& in, std::string& out)
++{
++    armcpu_t& cpu = procnum == ARMCPU_ARM9 ? NDS_ARM9 : NDS_ARM7;
++    size_t i = 0;
++    while (i < in.size()) {
++        if (in[i] != '%') { out += in[i++]; continue; }
++        size_t j = in.find('%', i + 1);
++        if (j == std::string::npos || j - i > 12) { out += in[i++]; continue; }
++        std::string tok = in.substr(i + 1, j - i - 1);
++        char tmp[16];
++        int reg = -1;
++        if (tok.empty()) { out += '%'; i = j + 1; continue; }
++        if (tok == "sp") reg = 13;
++        else if (tok == "lr") reg = 14;
++        else if (tok == "pc") reg = 15;
++        else if (tok[0] == 'r' && tok.size() <= 3 && tok.find_first_not_of("0123456789", 1) == std::string::npos) {
++            int v = atoi(tok.c_str() + 1);
++            if (v >= 0 && v <= 15) reg = v;
++        }
++        if (reg >= 0) {
++            snprintf(tmp, sizeof(tmp), "%08X", cpu.R[reg]);
++            out += tmp; i = j + 1; continue;
++        }
++        if (tok == "frame") { snprintf(tmp, sizeof(tmp), "%d", currFrameCounter); out += tmp; i = j + 1; continue; }
++        if (tok == "scanline") { snprintf(tmp, sizeof(tmp), "%u", (unsigned)nds.VCount); out += tmp; i = j + 1; continue; }
++        out += in[i++];
++    }
++}
++
++// Called from validateIORegsWrite (MMU.cpp) for 0x04FFFA00..0x04FFFA3F.
++// Registers (BlocksDS libnds <nds/debug.h>, GBATEK no$gba):
++//   0x04FFFA10 string pointer, raw             0x04FFFA14 string pointer, %params%
++//   0x04FFFA18 string pointer, %params% + LF   0x04FFFA1C character
++// Every captured message is stored followed by '\n' (unless it already ends with one).
++bool agent_nocash_write(int procnum, u32 addr, u32 size, u32 val)
++{
++    u32 a = addr & 0x0FFFFFFF;
++    if (a == 0x04FFFA10 || a == 0x04FFFA14 || a == 0x04FFFA18) {
++        if (size != 32) return true;
++        std::string s;
++        for (u32 p = val; s.size() < 256; p++) {
++            u8 c = _MMU_read08(procnum, MMU_AT_DEBUG, p);
++            if (c == 0) break;
++            s += (char)c;
++        }
++        std::string out;
++        if (a == 0x04FFFA10) out = s; else agent_dbg_expand(procnum, s, out);
++        if (out.empty() || out[out.size() - 1] != '\n') out += '\n';
++        agent_dbg_push(out.data(), out.size());
++        return true;
++    }
++    if (a == 0x04FFFA1C) {
++        char c = (char)(val & 0xFF);
++        agent_dbg_push(&c, 1);
++        return true;
++    }
++    return true; // swallow other debug-register writes (no "undefined register" spam)
++}
+diff --git a/desmume/src/frontend/interface/interface.h b/desmume/src/frontend/interface/interface.h
+index 52f54c1a..37e3371a 100644
+--- a/desmume/src/frontend/interface/interface.h
++++ b/desmume/src/frontend/interface/interface.h
+@@ -78,6 +78,19 @@ EXPORTED void desmume_resume(void);
+ EXPORTED void desmume_reset(void);
+ EXPORTED BOOL desmume_running(void);
+ EXPORTED void desmume_skip_next_frame(void);
++
++// ---- agent additions (overlay agent-2) ----
++// Returns the overlay version string, e.g. "agent-2".
++EXPORTED const char* desmume_agent_version(void);
++// Drains the captured no$gba debug output (nocashMessage / stderr of BlocksDS
++// homebrew). Copies up to cap-1 bytes, NUL-terminates, removes them from the
++// ring buffer and returns the number of bytes copied.
++EXPORTED int desmume_agent_debug_read(char* buf, int cap);
++// Enables/disables the x64 dynarec. Call after desmume_init, before desmume_open.
++EXPORTED void desmume_agent_set_jit(int enabled);
++// 1 (default): RTC starts at 2026-01-01 00:00:00 and advances with emulated
++// frames (deterministic). 0: host wall-clock time.
++EXPORTED void desmume_agent_set_rtc_fixed(int enabled);
+ EXPORTED void desmume_cycle(BOOL with_joystick);
+ 
+ EXPORTED int desmume_sdl_get_ticks();
+diff --git a/desmume/src/rtc.cpp b/desmume/src/rtc.cpp
+index 9b556193..9fdb7732 100644
+--- a/desmume/src/rtc.cpp
++++ b/desmume/src/rtc.cpp
+@@ -31,6 +31,11 @@
+ 
+ int rtcHourOverride = 0;
+ 
++#ifdef TARGET_INTERFACE
++// Headless agent: fixed, frame-driven clock (see interface.cpp)
++extern bool agent_rtc_fixed;
++#endif
++
+ typedef struct
+ {
+ 	// RTC registers
+@@ -97,6 +102,12 @@ bool moviemode=false;
+ DateTime rtcGetTime(void)
+ {
+ 	if(movieMode == MOVIEMODE_INACTIVE) {
++#ifdef TARGET_INTERFACE
++		if (agent_rtc_fixed) {
++			// 2026-01-01 00:00:00 + emulated time (~59.83 fps)
++			return DateTime(2026, 1, 1, 0, 0, 0).AddSeconds((double)((u64)currFrameCounter * 100 / 5983));
++		}
++#endif
+ 		return DateTime::get_Now().AddHours(rtcHourOverride);
+ 	}
+ 	else {

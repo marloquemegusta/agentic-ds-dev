@@ -1,1 +1,1 @@
-desmume-agent upstream=b3915949700be824253a35affa7f7b8248e84e46 interface=headless overlay=repo-codex
+desmume-agent upstream=b3915949700be824253a35affa7f7b8248e84e46 interface=headless overlay=agent-2

@@ -6,7 +6,7 @@ GAME_TITLE ?= NDS Game
 GAME_SUBTITLE ?= BlocksDS test
 GAME_AUTHOR ?= Agentic DS Dev
 SOURCEDIRS := arm9/source
-INCLUDEDIRS := arm9/include
+INCLUDEDIRS := arm9/include arm9/source
 BINDIRS ?=
-DEFINES ?= -DDS_DEBUG_TRACE -DDS_AUTOTEST
+DEFINES ?=
 include $(BLOCKSDS)/sys/default_makefiles/rom_arm9/Makefile

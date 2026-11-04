@@ -21,3 +21,4 @@ runtime/build/
 # Local archives
 *.tar.gz
 *.zip
+.codex-journal/

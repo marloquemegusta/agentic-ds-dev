@@ -2,10 +2,13 @@
 param(
     [string]$ReleaseTag = 'latest',
     [string]$Repo = 'marloquemegusta/agentic-ds-dev',
-    [switch]$Force
+    [switch]$Force,
+    # Keep the extracted runtime even if it does not match runtime/SHA256SUMS.
+    [switch]$AllowUnverified
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'wsl-common.ps1')
 $root = Split-Path -Parent $PSScriptRoot
 $runtimeBin = Join-Path $root 'runtime\bin'
 $libPath = Join-Path $runtimeBin 'libdesmume.so'
@@ -40,20 +43,31 @@ if ($needsRuntime) {
     }
 
     if (Test-Path -LiteralPath $archivePath) {
-        function ToWslPath([string]$p) {
-            $res = (Resolve-Path -LiteralPath $p).Path
-            return "/mnt/$($res.Substring(0,1).ToLowerInvariant())$($res.Substring(2).Replace('\','/'))"
-        }
-        $tarWsl = ToWslPath $archivePath
-        $destWsl = ToWslPath $runtimeBin
+        $tarWsl = ConvertTo-DsWslPath $archivePath
+        $destWsl = ConvertTo-DsWslPath $runtimeBin
         & wsl tar -xzf $tarWsl -C $destWsl
         & wsl chmod +x "$destWsl/desmume-agent" "$destWsl/libdesmume.so"
         Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
     }
 
     if ((-not (Test-Path -LiteralPath $libPath)) -or (-not (Test-Path -LiteralPath $agentPath))) {
-        Write-Warning "El runtime precompilado no est listo. Puedes construirlo con scripts/build-runtime.ps1 si dispones de herramientas en WSL."
+        Write-Warning "El runtime precompilado no esta listo. Puedes construirlo con scripts/build-runtime.ps1 si dispones de herramientas en WSL."
     } else {
+        # Verify the extracted binaries against runtime/SHA256SUMS ("<sha256>  <path relative to runtime/>").
+        $sums = Join-Path $root 'runtime\SHA256SUMS'
+        if (Test-Path -LiteralPath $sums) {
+            $bad = @()
+            foreach ($line in Get-Content -LiteralPath $sums) {
+                if ($line -notmatch '^([0-9a-fA-F]{64})\s+\*?(\S+)$') { continue }
+                $target = Join-Path (Join-Path $root 'runtime') $Matches[2]
+                $actual = if (Test-Path -LiteralPath $target) { (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash } else { '' }
+                if ($actual -ne $Matches[1].ToUpperInvariant()) { $bad += $Matches[2] }
+            }
+            if ($bad.Count -gt 0) {
+                if ($AllowUnverified) { Write-Warning "Checksum distinto en: $($bad -join ', '). Se mantiene por -AllowUnverified." }
+                else { throw "Checksum distinto en: $($bad -join ', ') (ver runtime/SHA256SUMS). Usa -AllowUnverified solo si confias en el origen." }
+            } else { Write-Host "  -> Runtime verificado con SHA256SUMS." }
+        }
         Write-Host "  -> Runtime DeSmuME instalado correctamente."
     }
 } else {
@@ -78,10 +92,10 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
         Write-Host "  -> Imagen Docker $image presente."
     }
 } else {
-    Write-Warning "Docker no est instalado o no est en el PATH. Necesario para compilar ROMs."
+    Write-Warning "Docker no esta instalado o no esta en el PATH. Necesario para compilar ROMs."
 }
 
-# 3. Validacin general del toolchain
+# 3. Validacion general del toolchain
 Write-Host "[3/3] Validando estado general..."
 & (Join-Path $PSScriptRoot 'check-toolchain.ps1')
 

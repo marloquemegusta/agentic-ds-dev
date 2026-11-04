@@ -1,306 +1,175 @@
 ---
 name: ds-game-dev
-description: Develop Nintendo DS games end to end on Windows with the bundled offline BlocksDS and DeSmuME toolchain, project scaffolding, host tests, scenarios, UX evidence, GDB, and confirmed DS upload.
+description: Use when working on a Nintendo DS / NDS homebrew game (C, libnds, BlocksDS): building ROMs, testing in headless DeSmuME, writing scenarios, profiling, debugging with GDB, or uploading to a DS over FTP.
 metadata:
-  short-description: Complete offline Nintendo DS development workflow
+  short-description: Offline Nintendo DS build, test, profile and upload workflow
 ---
 
-# Nintendo DS Game Development
+# Nintendo DS game development
 
-This skill is the complete DS development workflow. Use its bundled scripts,
-runtime, container image, templates, scenarios, and validators; do not ask the
-user to know DS toolchain commands.
+Run the bundled scripts yourself; do not ask the user for toolchain commands.
+Host: Windows 10/11, PowerShell, Docker (BlocksDS container) and WSL2 (headless
+DeSmuME, GDB, gcc for host tests). Run `scripts/check-toolchain.ps1` first; if
+Docker or WSL2 is missing, report it and stop before changing the system. If the
+image is not loaded use `scripts/load-blocksds-image.ps1` (never pull during an
+offline run). Setup details: `README.md`.
 
-## Supported host and offline package
+## What the emulator can and cannot prove
 
-- Supported host: Windows 10/11, PowerShell, plus Docker Desktop (normally with
-  WSL2 integration) or Docker Engine and WSL2 installed separately. Docker is
-  the offline BlocksDS container backend; WSL2 runs the bundled DeSmuME/GDB
-  runtime.
-- The package contains a pinned BlocksDS image at `images/blocksds-slim-latest.tar`,
-  a pinned headless DeSmuME runtime, its source and GDB overlay, runners, and
-  generic scenario contracts.
-- Run `scripts/check-toolchain.ps1` first. It reports whether Docker and WSL2,
-  Python, the BlocksDS image, and the DeSmuME runtime are available.
-- If the image is not loaded, use `scripts/load-blocksds-image.ps1`; do not
-  pull from the network during an offline run.
-- If Docker/WSL2 is missing, explain the host requirement and stop before making
-  system changes.
+- Proves: deterministic input handling, game state (memory read by symbol),
+  logic, rendering output at capture time, crashes in the interpreter.
+- Does not prove: hardware performance (bus, DMA and VRAM costs differ), audio,
+  SD/FAT behaviour, DSi or real timing, "feel". Never report 60 FPS from
+  emulator numbers. The ROM's own perf counters are comparable A/B only.
+- `PASS` proves only what the scenario asserted. A changed screen, pixel diff or
+  hash is not a correctness claim.
 
-## Project contract and onboarding
+## Commands (run from the skill dir; `-ProjectPath` is the project or worktree)
 
-For an existing project, inspect `AGENTS.md`, `DESIGN.md`, `TECHNICAL.md`,
-`STATUS.md`, `README.md`, and `.ds-game-dev/project.json` when present.
-
-The standard project layout is:
-
-```text
-source/ include/ tests/ scenarios/ tools/ artifacts/
-AGENTS.md DESIGN.md TECHNICAL.md STATUS.md README.md
-.ds-game-dev/project.json
-```
-
-If the project is new or this contract is incomplete, ask whether the user
-wants onboarding before creating or changing files. With approval, run
-`scripts/scaffold-project.ps1` and ask the product questions needed to draft
-`AGENTS.md` and `DESIGN.md`; show those drafts and wait for approval before
-writing them.
-
-## Autonomous development loop
-
-For a feature, improvement, bug fix, or UI change, complete the available
-build, host tests, scenario, capture, log, and diagnosis loop autonomously.
-Do not ask the user to perform a step that the skill can perform. Stop only
-when the remaining evidence needs human listening, physical hardware, or a
-product decision.
-
-1. Identify the user-visible or technical hypothesis.
-2. Read the project contract and relevant source/tests.
-3. Run the smallest relevant host test and add or update a project test when
-   the changed logic needs one.
-4. Build the current ROM with `scripts/build-project.ps1`.
-5. Run a project-owned scenario with `scripts/run-scenario.ps1` when the
-   behavior is observable.
-6. Read `manifest.json`, `events.jsonl`, `emulator.log`, and relevant PNGs.
-7. For UI changes, perform the UX evidence loop below and iterate on defects.
-8. Update `STATUS.md` only with facts supported by the evidence.
-9. Report facts, inferences, proposals, and physical validation boundaries
-   separately.
-
-## Build and host tests
-
-Use `scripts/build-project.ps1 -ProjectPath <repo>`. It reads the project's
-`.ds-game-dev/project.json`, loads the bundled BlocksDS image, copies the
-declared source/assets into an isolated build tree, runs `make -j`, and writes the
-requested ROM output. The build is incremental: only changed files are copied
-and recompiled (a no-change build takes ~2-3 s). The tree is rebuilt from
-scratch automatically when the template, `project.json` or the image change,
-or a source file is deleted; pass `-Clean` to force it.
-
-Run the host test commands declared in `project.json` with
-`scripts/run-host-tests.ps1` before and after the change. A build passing is
-not a behavioral test.
-
-## DeSmuME scenarios and evidence
-
-Use `scripts/run-scenario.ps1` with the current ROM, a project-owned scenario,
-and an output directory under `artifacts/`. Scenarios support `tap`, explicit
-`release`, `button_down`, `button_up`, `drag`, frame counts, captures, event
-traces, state assertions, and targeted visual assertions.
-
-Scenarios can read game memory: a `state` block maps names to offsets of a linked
-symbol (resolved from the linker `.map`; pass `-MapPath` or set `DS_MAP_PATH`),
-`state_capture` samples it, and `assertions.state_changes` checks deltas
-(`min_abs_delta`, `min_delta`, ...) or absolute values (`at` + `equals`,
-`min_value`, `max_value`). `capture_sequence`/`capture_every` save filmstrips.
-A scenario with no assertions passes with `DSM_SCENARIO_WARNING=no_assertions`;
-do not treat that as evidence. Full format: `references/scenario-format.md`.
-
-For every observable behavior, require a host-side contract test and a real
-input scenario that performs the modified gesture. Read the manifest first,
-then events, logs, and relevant captures. A `PASS`, `screen_changed`, pixel
-difference, or screenshot hash alone never proves the hypothesis.
-
-### Mandatory controller-input preflight
-
-Before using `button_down` / `button_up` as evidence for a gameplay, menu, or
-pause behavior, validate the controller path against the current ROM. The
-runner's `desmume_input_keypad_get()` only proves that the emulator frontend
-accepted a bitmask; it does **not** prove that the ROM consumed that button via
-`scanKeys()` / `keysDown()`.
-
-Create or run a small project-owned input-contract scenario whose button press
-causes a uniquely observable, asserted state change in that ROM (for example a
-dedicated input-test screen, a mode label, or a menu transition). Do not reuse
-the generic `input-contract.template.json` as proof: it is illustrative and
-may name a different ROM. Inspect the before/after captures and assert the
-specific transition. If this preflight fails, classify all button-driven
-scenario results as invalid and diagnose the runtime/input boundary before
-changing game controls or adding touch-only workarounds.
-
-Touch needs the same treatment: use a capture that proves the intended hitbox
-was activated, not merely a changed screen. Account for the DS lower-screen
-coordinate space explicitly and include a release between independent taps.
-
-### UX evidence loop
-
-For every UI change:
-
-1. Capture the relevant initial state.
-2. Execute the real modified gesture.
-3. Capture the resulting state and any needed menu, boundary, scroll, or
-   edited-surface states.
-4. Review layout, clipping, overlap, labels, legibility, hitboxes, feedback,
-   focus, and interaction clarity against the project's `DESIGN.md`.
-5. If a defect is found, fix it and repeat the scenario and review.
-
-Do not declare the loop complete while a known visual defect remains. Explain
-what each capture proves. Use a close-up when the affected surface is too small
-to judge at native resolution.
-
-### Technical walkthroughs
-
-When a milestone or session changes rendering, assets, runtime behavior, or a workflow,
-write or update its canonical document under `walkthroughs/<session-or-feature>/` and
-add it to `walkthroughs/README.md`. A walkthrough is a teaching and handoff
-document, not a short changelog. Explain enough context that another developer
-can understand the original failure, the reasoning behind the implementation,
-and how to reproduce and verify the result without relying on chat history.
-
-For a substantial technical change, include:
-
-1. A plain-language summary and the user-visible problem being solved.
-2. The relevant geometry/data flow, key dimensions and coordinate/anchor
-   conventions, then how the runtime consumes the generated data.
-3. The investigated alternatives and failed attempts, their observable
-   symptoms, root causes, and the change that resolved each one. Distinguish
-   confirmed causes from hypotheses.
-4. Durable invariants in `TECHNICAL.md`; product decisions in `DESIGN.md`,
-   workflow rules in this skill/`AGENTS.md`, and verified milestone facts in
-   `STATUS.md`. The walkthrough explains these sources rather than duplicating
-   them as competing specifications.
-5. Reproduction commands, test/build/scenario results, artifacts, current
-   limitations, and the next validation needed.
-
-Walkthroughs for a visual or graphical change must embed several relevant
-images, not merely link to an artifact directory. Prefer actual captures from
-the built ROM plus a real asset/orientation sheet or an enlarged crop where
-details are hard to judge. Store committed images next to the walkthrough and
-use relative Markdown image links. Add a short caption stating what each image
-shows and what it does *not* prove. Review every embedded image at native size
-and use close-ups for clipping, pivots, seams, and shadows. Synthetic gameplay
-screens or mockups must not be presented as game evidence; any derived crop or
-asset contact sheet must be clearly identified as such. Do not link only to
-gitignored `artifacts/` files if the walkthrough should work in a clean clone.
-
-Keep the walkthrough as verbose as the lesson requires: document measurements,
-API/version-specific pitfalls, memory/performance trade-offs, and unresolved
-risks when they materially explain the design. Never upgrade an emulator
-`PASS`, pixel difference, or screenshot hash into a stronger claim than the
-scenario actually asserted.
-
-### Prohibition of Synthetic Offline Mockups
-All gameplay simulations, combat animations, and scene/tile mockups MUST be executed
-directly inside the real game engine by compiling the ROM (`scripts/build-project.ps1`)
-and running a headless DeSmuME scenario (`scripts/run-scenario.ps1`). Generating
-mockups, gameplay animations, or preview GIFs via offline scripts (PIL, Python canvas,
-or synthetic frame compositors) outside the compiled binary is strictly prohibited.
-Evidence must always reflect the actual ARM9 C engine, simulation physics, particles,
-and rendering pipeline.
-
-## Performance: measure on the DS, compare in the emulator
-
-DeSmuME is for repeatable behavior and relative A/B comparisons only. Its
-frame timing does not certify DS/DSi performance: memory-bus, DMA, and VRAM
-costs differ on hardware, and a frame that looks cheap in the emulator can blow
-the budget on the console. Never report "60 FPS" from emulator numbers.
-
-### Budget (one frame at 59.826 Hz = 16.715 ms)
-
-| Counter | Units per frame |
+| Script | Key parameters / output |
 | :--- | :--- |
-| ARM9 CPU cycles (67.028 MHz) | ~1,120,000 |
-| `cpuGetTiming()` / BUS_CLOCK ticks (33.514 MHz) | **560,190** |
-| Timer at `ClockDivider_1024` | ~547 (545 at exactly 60 Hz) |
+| `check-toolchain.ps1` | `[-ProjectPath]`; `DS_CHECK` lines, `DS_TOOLCHAIN=PASS\|INCOMPLETE` |
+| `scaffold-project.ps1` | `-ProjectPath [-Title]`; layout, `project.json`, starter ROM source, smoke scenario, C test |
+| `build-project.ps1` | `-ProjectPath [-Variant name] [-Define NAME=VAL] [-OutputRom] [-Clean]`; `DS_BUILD=PASS ... warnings= new_warnings=` |
+| `run-host-tests.ps1` | `-ProjectPath [-Filter] [-TailLines]`; `DS_HOST_TESTS=PASS\|FAIL` |
+| `run-scenario.ps1` | `-ScenarioPath [-ProjectPath] [-RomPath] [-OutputPath] [-MapPath] [-StatesDir] [-Jit] [-NoSkipRender]`; `DSM_SCENARIO_RESULT=` |
+| `run-scenarios.ps1` | `-ProjectPath [-Filter 'wild*'] [-Tag] [-RomPath] [-OutputPath] [-StatesDir] ...`; one process, `DSM_SUITE_RESULT=`, `DS_SUITE_NONPASS=` |
+| `validate-gdb.ps1` | `-RomPath [-ProjectPath] [-ElfPath] [-Breakpoint main] [-Port] [-Frames] [-TimeoutSeconds]` |
+| `upload-rom.ps1` | `-ProjectPath -RomPath (-ConfirmUpload \| -DryRun) [-RemoteName]`; `FTP_UPLOAD_RESULT=` |
+| `fetch-device-log.ps1` | `-ProjectPath -RemoteFile /x.log [-OutDir] [-Delete]`; `DEVICE_LOG_RESULT=` |
+| `setup.ps1`, `build-runtime.ps1` | Install / rebuild the DeSmuME runtime (`README.md`, `references/desmume-agent.md`) |
 
-Always name the counter with the number; 33,514 bus ticks is 1 ms, not a frame.
-There are 263 scanlines (0..191 visible, 192..262 VBlank); work may continue
-during VBlank, so `REG_VCOUNT` is telemetry, not a deadline.
+`run-scenario(s)` default the ROM to `project.json` `rom`. Exit codes: 0 pass,
+1 fail or no assertions, 2 error. Scenario format: `references/scenario-format.md`.
+The first WSL call can cost ~30 s (cold start); the scripts keep WSL warm after that.
 
-### Hardware profiling loop
+## Project contract: `.ds-game-dev/project.json`
 
-1. Measure the exact ROM on the target device before editing. Split frame cost
-   by stage (simulation, BG/tile streaming, sprite or bitmap composition,
-   DMA/VRAM writes, VBlank wait) with `cpuStartTiming`/`cpuGetTiming`, and have
-   the ROM append per-window averages, maxima and frames-over-one-VBlank to a
-   log on the SD card behind a compile-time flag that is off by default.
-2. Build, upload (see "DS upload"), and ask the user to play the specific
-   repeatable situation (idle, sustained movement, busiest scene).
-3. Download the log with
-   `scripts/fetch-device-log.ps1 -ProjectPath <repo> -RemoteFile /<game>_perf.log`
-   (`-Delete` removes it afterwards; ask first). The same script reads crash
-   reports the ROM writes to the SD card.
-4. Run controlled A/B changes one path at a time with the same workload, and
-   check that movement, collision, visibility, actor order and controls stay
-   correct. Record device, ROM identity, and the counters' start/end semantics.
+| Key | Meaning |
+| :--- | :--- |
+| `title`, `rom`, `outputRom` | Game title; ROM path in the project; ROM name the build produces |
+| `buildTemplate` | `skill-default` or a project path to a BlocksDS Makefile tree |
+| `blocksdsImage` | Docker image (default `skylyrac/blocksds:slim-latest`) |
+| `copy` | `[{source, destination}]` project dirs/files copied into the build tree |
+| `defines` | Project-wide compile defines (`NAME=VAL` or `-DNAME`) |
+| `variants` | `{name: {defines: [...]}}`; `-Variant name` builds `<rom stem>-<name>.nds` in its own tree |
+| `hostTests` | Extra commands run by `run-host-tests.ps1` (cmd.exe, project root); `tests/c/test_*.c` are found automatically |
+| `scenarioDirectory` | Where `run-scenarios.ps1` looks (default `scenarios`) |
+| `romUploadName` | Remote file name on the SD card; do not override it unless asked |
+| `icon` | Optional banner icon |
 
-If hardware is unavailable, report results as emulator-only and leave physical
-performance unverified.
+Build products: the ROM plus `.ds-game-dev/build/out/<rom stem>.{elf,map,buildinfo.json}`
+(sha256, variant, defines, warning totals). Scenarios and GDB resolve symbols from
+them and refuse a mismatching ROM. The build is incremental (~3-4 s no-op, ~6-7 s
+clean for a mid-size game); the warning ledger reports the total even on
+incremental builds. New project: ask before scaffolding, then draft the project's
+`AGENTS.md`/`DESIGN.md` and wait for approval. For walkthroughs and status
+documents follow the project's `AGENTS.md`.
 
-### Architecture rules (design targets, not guarantees)
+## Verification levels (detail: `references/verification-levels.md`)
 
-- **Floating point:** the ARM9 has no FPU; `float`/`double` work through
-  soft-float and are far too slow for per-frame game code. Use fixed point.
-- **Division:** the ARM9 has a hardware divider and square root
-  (`div32`/`mod32`/`sqrt32` in libnds). C `/` and `%` in hot loops still go
-  through a slower library call: prefer shifts, reciprocal LUTs, or the hardware
-  divider explicitly.
-- **Backgrounds:** delegate scrolling scenery to hardware BG layers. Register
-  scrolling is nearly free, but map/tile streaming and VRAM writes are not.
-- **Sprites:** OAM gives 128 hardware sprites with free compositing, but
-  `oamUpdate` costs time, sprites per scanline are limited, and there are only
-  32 affine matrices.
-- **Framebuffers:** never rasterize full-screen 16-bit bitmaps on both screens
-  every frame in software without dirty tracking. `MODE_FB0`/`MODE_FB1` show a
-  raw VRAM bank and disable BG, sprites and 3D on that screen; with a bitmap BG,
-  draw straight into the back page in VRAM instead of copying a whole screen
-  from main RAM.
-- **Static work:** pre-bake static shadows and world elements once at load.
-- **Alignment:** the ARM946E-S does not fix up unaligned 32-bit access. An
-  unaligned `LDR` returns the aligned word rotated by `8 * (addr & 3)` bits and an
-  unaligned `STR` writes to `addr & ~3`. Access unaligned pixel data as 16-bit
-  halfwords; use aligned words, `memcpy` or DMA for bulk transfers.
-- **Cache coherency:** call `DC_FlushRange()` on the source before DMA from main
-  RAM, and `DC_InvalidateRange()` on the destination before the CPU reads memory
-  that DMA wrote to main RAM.
-- **Code placement:** BlocksDS builds ARM9 code as Thumb by default; mark hot
-  inner loops `__attribute__((target("arm")))` and consider ITCM/DTCM.
+| Level | What | Proves |
+| :--- | :--- | :--- |
+| L0 | `build-project.ps1`, 0 new warnings | It compiles and links |
+| L1 | `run-host-tests.ps1` | Pure logic. Prefer C tests (gcc + ASan/UBSan, `references/host-tests.md`) over Python mirrors or regex-on-source, which do not test the C |
+| L2 | Targeted scenario(s): state assertions + `debug.log` | The changed behaviour through real input in the ROM |
+| L3 | `run-scenarios.ps1`, full suite | No regressions; run once before merge |
+| L4 | Hardware (`references/hardware-workflow.md`) | Performance, audio, SD, feel |
 
-Archetype-specific patterns (high-entity framebuffers, tilemap + OAM games,
-3D geometry) and an example subsystem allocation are in
-`references/performance-architecture.md`. Read it before writing rendering,
-simulation, or memory-management code.
+| Type of change | Minimum level |
+| :--- | :--- |
+| Docs, comments | none; L0 if a code file was touched |
+| Scenario-only edit | Run the edited scenario |
+| Pure logic, math, data tables | L0 + L1 |
+| Gameplay, input, state machine, UI | L0 + L1 (if logic is extractable) + L2 |
+| Rendering, assets, palette, layout | L0 + L2 with captures reviewed |
+| Shared code, refactor, before merge | L0 + L1 + L3 |
+| Per-frame loops, render, DMA, memory, audio | the above + L4 |
 
-## GDB and runtime diagnostics
+Spend the least that proves the hypothesis: iterate with one scenario or one
+`-Filter`, run the suite once before merge, do not rebuild or re-run what did not
+change. Skip a level only if its prerequisite does not exist, and say so.
 
-Use `scripts/validate-gdb.ps1 -RomPath <rom>` only for a concrete diagnostic hypothesis. The
-runtime exposes ARM9 GDB remote debugging; it does not prove source-level
-symbols, audio, physical timing, or hardware compatibility. For crashes that
-only happen on hardware, have the ROM write a crash report to the SD card and
-read it with `scripts/fetch-device-log.ps1`.
+## Evidence rules
+
+- Read `result.json` first (status, failed checks with expected/actual,
+  warnings), then `debug.log` (ROM `DS_LOG` output), then captures, only when an
+  assertion cannot express the check. Do not read full manifests by default.
+- `NO_ASSERTIONS` is a failure unless the scenario sets `evidence_only`, and an
+  evidence-only run proves nothing.
+- Assert state, not pixels: expose a `g_probe`-style struct (template
+  `source/main.c`) and read its fields via `state`. Make sure the actor
+  coordinates really cross the wall, trigger or hitbox the scenario claims to
+  test, and name captures after what they show.
+- No synthetic mockups presented as game evidence. Contact sheets, crops or GIFs
+  assembled from real captures are fine if labelled as derived.
+- Report facts, inferences and unverified (hardware) items separately.
+- UI changes: capture the initial state, perform the real gesture, capture the
+  result, review layout, clipping and hitboxes against the project's `DESIGN.md`,
+  fix and repeat. Use a close-up for small details.
+
+### Input preflight (once per project and runtime version, not per scenario)
+
+The emulator accepting a keypad bitmask does not prove the ROM reads it. Run a
+scenario against the project's ROM where a button press and a touch each change
+a probe field (the template's `g_probe.presses_a`, `last_keys`, `touch_x/y`),
+asserted with `state_changes`. If it fails, every button/touch result is invalid:
+fix the runtime/input boundary before changing game controls. Re-run it after
+updating the runtime or the input code. `scenarios/*.template.json` are
+illustrative, not proof.
+
+Touch: x 0..255, y 0..191 (lower screen). Captures are 256x384 with the lower
+screen at y >= 192, so subtract 192 from a capture y. `tap` holds until
+`release`; release between independent taps.
+
+## Performance rules (detail: `references/performance-architecture.md`)
+
+- Budget: one frame at 59.826 Hz = **560,190 `cpuGetTiming()` bus ticks**
+  (33.514 MHz); 33,514 ticks = 1 ms, not a frame. Always name the counter.
+- No `float`/`double` in per-frame code; use fixed point (8.8 / 12.12). Use the
+  hardware divider and root (`div32`, `mod32`, `sqrt32`); avoid C `/` and `%` in hot loops.
+- No unaligned 32-bit access; use 16-bit halfwords, `memcpy` or DMA. VRAM needs
+  16/32-bit writes on hardware, not 8-bit.
+- Main RAM to DMA: `DC_FlushRange` the source first; `DC_InvalidateRange` the
+  destination before the CPU reads DMA-written RAM.
+- OAM: 128 sprites, 32 affine matrices, per-scanline sprite limits.
+- `MODE_FB0/FB1` shows a raw VRAM bank and disables BGs, sprites and 3D on that engine.
+- Measure on the DS. A feature that looks fine but drops below 60 FPS on the
+  console is not done.
+
+## Hardware loop (detail: `references/hardware-workflow.md`)
+
+Build a `perf` variant (`DS_PERF`, `DS_REPLAY`, `DS_CRASHLOG` from
+`templates/dsagent/`) with a replay generated from a scenario's `input_trace.json`.
+After the user confirms the upload, they only open the ROM and wait for
+`REPLAY_DONE`; then run `fetch-device-log.ps1` and read average, max, `over` and
+`slow`. Compare A/B on the same replay. Rebuild the default variant before delivering.
+
+## GDB
+
+`validate-gdb.ps1` exposes ARM9 GDB for a concrete hypothesis (crash location,
+breakpoint, registers). It needs the ELF sidecar for symbols and proves nothing
+about audio, timing or hardware. Hardware-only crashes: the `ds_crash` log on the SD.
 
 ## DS upload
 
-Build and validation do not upload automatically. Upload only after explicit
-user confirmation immediately before the external mutation. Use
-`scripts/upload-rom.ps1 -ProjectPath <worktree> -RomPath <rom> -ConfirmUpload`.
-
-- FTP settings resolve from the skill's `config/ftp.json`, then the project's
-  `.ds-game-dev/project.json` (`romUploadName`), then an optional gitignored
-  `.ds-game-dev/ftp.local.json`, then explicit parameters. Do not pass
-  `-RemoteName` unless the user asks: the project's name is the file the user
-  opens on the console.
-- The script refuses a ROM older than the project's sources (`ROM_STALE`),
-  warns when the ROM is outside `-ProjectPath`, checks the port first
-  (`FTP_UNREACHABLE` means the DS is not running its FTP server), and verifies
-  the remote size.
-- On failure, do not retry blindly: report the exact failure and ask the user
-  to open the FTP server on the DS or validate IP, port and path.
-
-After upload, report the remote file, size, branch and commit from
-`FTP_UPLOAD_RESULT`, what the user should look for to recognize the new build,
-and that audio and physical behavior still require testing on the DS.
+- Only after explicit user confirmation, valid for that one upload. Run
+  `upload-rom.ps1 ... -DryRun` first (checks sha, staleness, variant), then
+  `-ConfirmUpload`. Upload the ROM built from the worktree you worked in.
+- It refuses `ROM_UNKNOWN` (sha differs from the last build) and `ROM_STALE`.
+  `FTP_UNREACHABLE` means the DS is not running its FTP server: ask the user to
+  open it; do not retry blindly. Settings come from `config/ftp.json`, the
+  project's `romUploadName`, an optional gitignored `.ds-game-dev/ftp.local.json`,
+  then parameters.
+- Report remote file, size, branch, commit and variant from `FTP_UPLOAD_RESULT`,
+  and what the user should look for on the console. Flag a non-default variant
+  (perf, debug) to the user as such.
 
 ## Boundaries
 
-- Product meaning, visual language, controls, and UX acceptance criteria come
-  from the project's `DESIGN.md`.
-- Implementation invariants come from `TECHNICAL.md`.
-- Worktrees, branches, commits, merge permission, and repository ownership come
-  from the project's `AGENTS.md`.
-- Changes to this skill go on a branch of the skill repository (for example a
-  sibling worktree `agentic-ds-dev.wt-<name>`), never on its `main` checkout
-  while other sessions may be using it.
-- Do not use Android, ADB, melonDS, or NO$GBA unless the project explicitly
-  authorizes a distinct diagnostic workflow.
-- Do not claim physical audio or DS/DSi compatibility from emulation.
+- Product decisions: the project's `DESIGN.md`. Invariants: `TECHNICAL.md`.
+  Process, branches, commits, merges: `AGENTS.md`. Do not invent product behaviour.
+- Changes to this skill go on a branch/worktree of the skill repo
+  (`agentic-ds-dev.wt-<name>`), never on its `main` checkout.
+- No Android/ADB, melonDS or NO$GBA unless the project authorizes it.
+- The runtime's `--jit` is experimental (it froze a real ROM); never use it for evidence.

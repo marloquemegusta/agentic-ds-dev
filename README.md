@@ -1,64 +1,65 @@
-﻿# Agentic Nintendo DS Development Skill (`agentic-ds-dev`)
+﻿# agentic-ds-dev
 
-Autonomous Nintendo DS development skill designed for AI coding agents (Codex, Antigravity, Claude Code, etc.) and developers.
+A skill for AI coding agents (and developers) that build Nintendo DS homebrew in
+C with libnds and BlocksDS on Windows. It bundles:
 
-It bundles:
-* **Dockerized BlocksDS toolchain** for isolated, reproducible ROM compilation.
-* **Headless DeSmuME runtime** with an automated input engine (buttons, touch coordinates, frame advancement, screenshots, and visual diff assertions).
-* **ARM9 GDB remote debugging** stub integration.
-* **Scaffolding and contracts** for test-driven homebrew development.
+- a Dockerized BlocksDS toolchain (incremental builds, build variants);
+- a headless DeSmuME runtime with scripted input, memory-state assertions,
+  captures, debug-log capture, savestates and an ARM9 GDB stub;
+- host-test support (C tests with sanitizers), a ROM-side kit for on-device
+  profiling, replay and crash logs, and FTP upload to a DS.
 
----
+The agent entry point is `SKILL.md`; detailed material is in `references/`.
 
 ## Prerequisites
 
-- **Windows 10 / 11** with PowerShell.
-- **WSL 2** with Python 3 (runs the headless DeSmuME ABI and GDB stub).
-- **Docker Desktop** (used to compile ROMs via the official BlocksDS container).
+- Windows 10/11 with PowerShell.
+- WSL 2 with `python3` (runs DeSmuME and GDB) and `gcc` (C host tests).
+- Docker Desktop, or Docker Engine plus WSL 2 (BlocksDS container).
 
----
-
-## Quick Start / Setup
-
-Clone this skill into your local skills directory:
-
-```bash
-git clone https://github.com/marloquemegusta/agentic-ds-dev.git
-cd agentic-ds-dev
-```
-
-Bootstrap the runtime environment:
+## Setup
 
 ```powershell
-.\scripts\setup.ps1
+.\scripts\setup.ps1             # download the DeSmuME runtime, load the BlocksDS image
+.\scripts\check-toolchain.ps1   # DS_TOOLCHAIN=PASS when everything is usable
 ```
 
-Verify that all tools and runtimes are operational:
+`setup.ps1` downloads the runtime from the GitHub release (`-ReleaseTag`) and
+verifies it against `runtime/SHA256SUMS`; it fails on a mismatch unless
+`-AllowUnverified` is given. The release can lag the local `agent-2` build: after
+patch changes, or if `check-toolchain.ps1` reports an older `agent_version`, run
+`.\scripts\build-runtime.ps1` (WSL; applies `runtime/patches/` to the pinned
+DeSmuME commit and updates `SHA256SUMS`). See `references/desmume-agent.md`.
 
-```powershell
-.\scripts\check-toolchain.ps1
-```
+## Scripts
 
----
+| Script | Purpose |
+| :--- | :--- |
+| `setup.ps1` | Install the runtime and the BlocksDS image |
+| `check-toolchain.ps1 [-ProjectPath]` | Verify Docker, image, WSL, runtime, gcc |
+| `scaffold-project.ps1 -ProjectPath [-Title]` | Create the layout, `project.json` and starter files |
+| `build-project.ps1 -ProjectPath [-Variant] [-Define] [-Clean]` | Build the ROM |
+| `run-host-tests.ps1 -ProjectPath [-Filter]` | Run `hostTests` commands and `tests/c/test_*.c` |
+| `run-scenario.ps1 -ScenarioPath [-ProjectPath] [-RomPath] [-OutputPath]` | Run one scenario |
+| `run-scenarios.ps1 -ProjectPath [-Filter] [-Tag]` | Run many scenarios in one process |
+| `validate-gdb.ps1 -RomPath` | ARM9 GDB breakpoint and register check |
+| `upload-rom.ps1 -ProjectPath -RomPath (-DryRun \| -ConfirmUpload)` | FTP upload (needs user confirmation) |
+| `fetch-device-log.ps1 -ProjectPath -RemoteFile` | Download a log written to the SD card |
+| `build-runtime.ps1` | Rebuild `libdesmume.so` from the pinned upstream plus patches |
 
-## Workflow & Scripts
+## Layout
 
-| Script | Description |
-|---|---|
-| `.\scripts\setup.ps1` | Bootstraps headless DeSmuME binaries from Releases & prepares BlocksDS Docker image. |
-| `.\scripts\check-toolchain.ps1` | Verifies WSL2, Docker, Python, BlocksDS container, and DeSmuME runtime status. |
-| `.\scripts\scaffold-project.ps1 -ProjectPath <path>` | Scaffolds a new standard DS homebrew project layout. |
-| `.\scripts\build-project.ps1 -ProjectPath <path>` | Builds the Nintendo DS ROM (`.nds`) using BlocksDS, incrementally (`-Clean` forces a full rebuild). |
-| `.\scripts\run-scenario.ps1 -RomPath <rom> -ScenarioPath <scenario> -OutputPath <out>` | Runs a deterministic headless test scenario with touch/buttons and collects PNG captures. |
-| `.\scripts\validate-gdb.ps1 -RomPath <rom>` | Spawns DeSmuME with ARM9 GDB stub and validates register reads and breakpoints. |
-| `.\scripts\upload-rom.ps1 -ProjectPath <path> -RomPath <rom> -ConfirmUpload` | Uploads the built ROM over FTP with the project's `romUploadName`; refuses stale ROMs and checks the port first. |
-| `.\scripts\fetch-device-log.ps1 -ProjectPath <path> -RemoteFile /<file>.log` | Downloads a log the ROM wrote to the SD card (profiling, crash reports) into `artifacts/device-logs/`. |
+| Path | Content |
+| :--- | :--- |
+| `SKILL.md` | Agent instructions |
+| `references/` | `scenario-format`, `verification-levels`, `host-tests`, `hardware-workflow`, `performance-architecture`, `desmume-agent` |
+| `templates/project/` | Starter game, smoke scenario, example C test |
+| `templates/dsagent/` | ROM-side kit: `ds_log`, `ds_perf`, `ds_replay`, `ds_crash` |
+| `templates/host-test/ds_test.h` | Single-header C test harness |
+| `templates/blocksds-test/` | Default BlocksDS build template |
+| `tools/scenario_to_replay.py` | Scenario or input trace to on-device replay |
+| `runtime/` | Runner, patches, prebuilt binaries (`bin/` is fetched by `setup.ps1`) |
 
----
+## Tests
 
-## Architecture & Binary Distribution
-
-To keep this repository lightweight (< 1 MB) and fast to clone:
-* Precompiled Linux x86_64 binaries (`libdesmume.so` and `desmume-agent`) are hosted as release assets on [GitHub Releases](https://github.com/marloquemegusta/agentic-ds-dev/releases).
-* Source patches and instructions to recompile the headless DeSmuME runtime from upstream are available in `runtime/patches/`.
-* BlocksDS is pulled automatically from Docker Hub (`skylyrac/blocksds:slim-latest`).
+`python -m unittest discover tests` (runner and replay converter).

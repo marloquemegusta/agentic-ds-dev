@@ -1,33 +1,45 @@
-﻿param(
-    [Parameter(Mandatory)] [string]$RomPath,
+﻿[CmdletBinding()]
+param(
     [Parameter(Mandatory)] [string]$ScenarioPath,
-    [Parameter(Mandatory)] [string]$OutputPath,
-    [string]$MapPath
+    [string]$ProjectPath,
+    # Defaults to the project's "rom" from .ds-game-dev/project.json.
+    [string]$RomPath,
+    # Defaults to <project>\artifacts\scenarios\<scenario>-<timestamp>.
+    [string]$OutputPath,
+    [string]$MapPath,
+    [string]$StatesDir,
+    [switch]$Jit,
+    [switch]$NoSkipRender
 )
+# Prints only DSM_ lines; the full raw output goes to <out>\emulator.log.
+# Exit code: 0 pass, 1 fail/no assertions, 2 error.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$runner = Join-Path $root 'runtime\run_scenario.py'
-$library = Join-Path $root 'runtime\bin\libdesmume.so'
-foreach ($path in @($RomPath, $ScenarioPath, $runner, $library)) {
-    if (-not (Test-Path -LiteralPath $path)) { throw "Ruta no encontrada: $path" }
+. (Join-Path $PSScriptRoot 'wsl-common.ps1')
+. (Join-Path $PSScriptRoot 'project-common.ps1')
+
+if (-not (Test-Path -LiteralPath $ScenarioPath)) { throw "Escenario no encontrado: $ScenarioPath" }
+$scenario = (Resolve-Path -LiteralPath $ScenarioPath).Path
+$project = $null
+if ($ProjectPath) {
+    $project = (Resolve-Path -LiteralPath $ProjectPath).Path.TrimEnd('\')
+    $config = Get-DsProjectConfig $project
+    if (-not $RomPath) { $RomPath = Get-DsRomPath $config $project }
+}
+if (-not $RomPath) { throw 'Falta -RomPath (o -ProjectPath con "rom" en project.json).' }
+if (-not $MapPath -and $project) {
+    $info = Get-DsBuildInfoPath $project $RomPath
+    if (Test-Path -LiteralPath $info) {
+        $map = (Get-Content -Raw -LiteralPath $info | ConvertFrom-Json).map
+        if ($map -and (Test-Path -LiteralPath $map)) { $MapPath = $map }
+    }
+}
+if (-not $OutputPath) {
+    $base = if ($project) { Join-Path $project 'artifacts\scenarios' } else { Join-Path $env:TEMP 'ds-game-dev\scenarios' }
+    $OutputPath = Join-Path $base ("{0}-{1}" -f [IO.Path]::GetFileNameWithoutExtension($scenario), (Get-Date -Format 'yyyyMMdd-HHmmss'))
 }
 New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
-function WslPath([string]$path) {
-    $resolved = (Resolve-Path -LiteralPath $path).Path
-    return "/mnt/$($resolved.Substring(0,1).ToLowerInvariant())$($resolved.Substring(2).Replace('\','/'))"
-}
-$log = Join-Path $OutputPath 'emulator.log'
-$wslArgs = @('python3', '-u', (WslPath $runner), (WslPath $RomPath), (WslPath $ScenarioPath), (WslPath $OutputPath), (WslPath $library))
-if ($MapPath) { $wslArgs += (WslPath $MapPath) }
-# Windows PowerShell 5.1 turns native stderr into terminating errors under
-# 'Stop'; relax it only around the native call and restore it afterwards.
-$previousPreference = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-try {
-    & wsl @wslArgs 2>&1 | Tee-Object -FilePath $log
-    $exitCode = $LASTEXITCODE
-} finally {
-    $ErrorActionPreference = $previousPreference
-}
-if ($exitCode -ne 0) { throw "El escenario DeSmuME falló (exit $exitCode). Ver $log" }
-Write-Output "DSM_SCENARIO_RESULT=PASS output=$OutputPath"
+$OutputPath = (Resolve-Path -LiteralPath $OutputPath).Path
+$exit = Invoke-DsRunner -SkillRoot $root -RomPath $RomPath -ScenarioPaths @($scenario) -OutputPath $OutputPath `
+    -MapPath $MapPath -StatesDir $StatesDir -Jit:$Jit -NoSkipRender:$NoSkipRender
+exit $exit

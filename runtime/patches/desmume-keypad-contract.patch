@@ -1,77 +1,7 @@
-diff --git a/desmume/src/frontend/interface/interface.cpp b/desmume/src/frontend/interface/interface.cpp
-index 19fcb10..a576e0f 100644
---- a/desmume/src/frontend/interface/interface.cpp
-+++ b/desmume/src/frontend/interface/interface.cpp
-@@ -62,11 +62,14 @@ std::wstring s2ws(const std::string& str)
-     return converter.from_bytes(str);
- }
- 
-+u16 agent_keypad_state = 0;
-+
- EXPORTED int desmume_init()
- {
-     NDS_Init();
--    // TODO: Option to disable audio
--    SPU_ChangeSoundCore(SNDCORE_SDL, 735 * 4);
-+    // The agent is strictly headless. Keep the dummy core selected so a
-+    // development run never touches the host audio device.
-+    SPU_ChangeSoundCore(SNDCORE_DUMMY, 735 * 4);
-     SPU_SetSynchMode(0, 0);
-     SPU_SetVolume(100);
-     SNDSDLSetAudioVolume(100);
-@@ -137,7 +140,7 @@ EXPORTED void desmume_skip_next_frame()
- 
- EXPORTED void desmume_cycle(BOOL with_joystick)
- {
--    u16 keypad;
-+    u16 keypad = agent_keypad_state;
-     /* Joystick events */
-     if (with_joystick) {
-         /* Retrieve old value: can use joysticks w/ another device (from our side) */
-@@ -148,13 +151,17 @@ EXPORTED void desmume_cycle(BOOL with_joystick)
-         update_keypad(keypad);
-     }
- 
--    NDS_beginProcessingInput();
--    {
--        FCEUMOV_AddInputState();
--    }
--    NDS_endProcessingInput();
--
-+    // Use DeSmuME's normal keypad path so the requested state reaches
-+    // raw input, final input, and the emulated KEYINPUT register.
-+    update_keypad(keypad);
-+    // The exported ABI uses the hardware/libnds KEYINPUT bit layout.
-+    // Reassert it at the frame boundary because ARM7 may refresh the
-+    // peripheral while the frame is being executed.
-+    HostWriteWord(MMU.ARM9_REG, 0x130, (u16)~keypad);
-+    HostWriteWord(MMU.ARM7_REG, 0x130, (u16)~keypad);
-     NDS_exec<false>();
-+    HostWriteWord(MMU.ARM9_REG, 0x130, (u16)~keypad);
-+    HostWriteWord(MMU.ARM7_REG, 0x130, (u16)~keypad);
-     SPU_Emulate_user();
- }
- 
-@@ -582,6 +589,7 @@ EXPORTED void desmume_input_joy_set_key(int index, int joystick_key_index)
- 
- EXPORTED void desmume_input_keypad_update(u16 keys)
- {
-+    agent_keypad_state = keys;
-     update_keypad(keys);
- }
- 
-@@ -590,6 +598,7 @@ EXPORTED u16 desmume_input_keypad_get(void)
-     return get_keypad();
- }
- 
-+
- EXPORTED void desmume_input_set_touch_pos(u16 x, u16 y)
- {
-     NDS_setTouchPos(x, y);
-diff --git "a/C:\\codexlocal\\desmume-upstream\\desmume\\src\\MMU.h" "b/C:\\Users\\malfonso\\.codex\\skills\\ds-game-dev\\runtime\\source\\desmume\\src\\MMU.h"
-index 9088563..444d871 100644
---- "a/C:\\codexlocal\\desmume-upstream\\desmume\\src\\MMU.h"
-+++ "b/C:\\Users\\malfonso\\.codex\\skills\\ds-game-dev\\runtime\\source\\desmume\\src\\MMU.h"
+diff --git a/desmume/src/MMU.h b/desmume/src/MMU.h
+index 261247be..651dfc4f 100644
+--- a/desmume/src/MMU.h
++++ b/desmume/src/MMU.h
 @@ -692,6 +692,15 @@ FORCEINLINE void CheckMemoryDebugEvent(EDEBUG_EVENT event, const MMU_ACCESS_TYPE
  	}
  }
@@ -118,3 +48,65 @@ index 9088563..444d871 100644
  
  	//special handling to un-protect the ARM7 bios during debug reading
  	if(PROCNUM == ARMCPU_ARM7 && AT == MMU_AT_DEBUG && addr<0x00004000)
+diff --git a/desmume/src/frontend/interface/interface.cpp b/desmume/src/frontend/interface/interface.cpp
+index 04ce38bd..a576e0f6 100644
+--- a/desmume/src/frontend/interface/interface.cpp
++++ b/desmume/src/frontend/interface/interface.cpp
+@@ -62,6 +62,8 @@ std::wstring s2ws(const std::string& str)
+     return converter.from_bytes(str);
+ }
+ 
++u16 agent_keypad_state = 0;
++
+ EXPORTED int desmume_init()
+ {
+     NDS_Init();
+@@ -138,7 +140,7 @@ EXPORTED void desmume_skip_next_frame()
+ 
+ EXPORTED void desmume_cycle(BOOL with_joystick)
+ {
+-    u16 keypad;
++    u16 keypad = agent_keypad_state;
+     /* Joystick events */
+     if (with_joystick) {
+         /* Retrieve old value: can use joysticks w/ another device (from our side) */
+@@ -149,13 +151,17 @@ EXPORTED void desmume_cycle(BOOL with_joystick)
+         update_keypad(keypad);
+     }
+ 
+-    NDS_beginProcessingInput();
+-    {
+-        FCEUMOV_AddInputState();
+-    }
+-    NDS_endProcessingInput();
+-
++    // Use DeSmuME's normal keypad path so the requested state reaches
++    // raw input, final input, and the emulated KEYINPUT register.
++    update_keypad(keypad);
++    // The exported ABI uses the hardware/libnds KEYINPUT bit layout.
++    // Reassert it at the frame boundary because ARM7 may refresh the
++    // peripheral while the frame is being executed.
++    HostWriteWord(MMU.ARM9_REG, 0x130, (u16)~keypad);
++    HostWriteWord(MMU.ARM7_REG, 0x130, (u16)~keypad);
+     NDS_exec<false>();
++    HostWriteWord(MMU.ARM9_REG, 0x130, (u16)~keypad);
++    HostWriteWord(MMU.ARM7_REG, 0x130, (u16)~keypad);
+     SPU_Emulate_user();
+ }
+ 
+@@ -583,6 +589,7 @@ EXPORTED void desmume_input_joy_set_key(int index, int joystick_key_index)
+ 
+ EXPORTED void desmume_input_keypad_update(u16 keys)
+ {
++    agent_keypad_state = keys;
+     update_keypad(keys);
+ }
+ 
+@@ -591,6 +598,7 @@ EXPORTED u16 desmume_input_keypad_get(void)
+     return get_keypad();
+ }
+ 
++
+ EXPORTED void desmume_input_set_touch_pos(u16 x, u16 y)
+ {
+     NDS_setTouchPos(x, y);

@@ -1,0 +1,24 @@
+{
+  "name": "smoke",
+  "comment": "Proves input reaches the ROM: g_probe is read from RAM through the linker map (.ds-game-dev/build/build/game-blocksds.map).",
+  "state": {
+    "symbol": "g_probe",
+    "fields": { "frame": 0, "presses_a": 4, "last_keys": 8, "touch_x": 12, "touch_y": 16 }
+  },
+  "steps": [
+    { "frames": 30, "state_capture": "idle" },
+    { "button_down": "A", "frames": 3 },
+    { "button_up": "A", "frames": 3, "state_capture": "after_a" },
+    { "tap": { "x": 120, "y": 80 }, "frames": 4, "state_capture": "touched" },
+    { "release": true, "frames": 2 }
+  ],
+  "assertions": {
+    "state_changes": [
+      { "from": "idle", "to": "after_a", "field": "frame", "min_delta": 5 },
+      { "from": "idle", "to": "after_a", "field": "presses_a", "min_delta": 1, "max_delta": 1 },
+      { "at": "idle", "field": "presses_a", "equals": 0 },
+      { "at": "touched", "field": "touch_x", "min_value": 117, "max_value": 123 },
+      { "at": "touched", "field": "touch_y", "min_value": 77, "max_value": 83 }
+    ]
+  }
+}

@@ -1,0 +1,4 @@
+*.nds
+artifacts/
+.ds-game-dev/build/
+__pycache__/

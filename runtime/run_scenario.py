@@ -75,7 +75,8 @@ STATE_ASSERT_KEYS = {"field", "from", "to", "at"} | set(CHECK_KEYS)
 STATE_CONFIG_KEYS = {"map", "map_path", "elf", "symbols", "symbol", "default_symbol", "fields"}
 FIELD_SPEC_KEYS = {"symbol", "offset", "type"}
 WAIT_KEYS = {"field", "equals", "not_equals", "min_value", "max_value", "timeout_frames"}
-POKE_KEYS = {"symbol", "offset", "type", "value"}
+POKE_KEYS = {"symbol", "offset", "type", "value", "field"}
+POKE_DIRECT_KEYS = {"symbol", "offset", "type"}  # addressing keys; incompatible with "field"
 NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 DEBUG_EVENT_CAP = 200
 DEBUG_BUF = 65536
@@ -237,6 +238,46 @@ def _check_name(value, where: str, problems: list) -> None:
         problems.append(f"{where}: must be a name made of letters, digits, '_', '-', '.' (got {value!r})")
 
 
+def _check_poke(poke, where: str, state_given: bool, aliases: set, default_symbol: str,
+                fields: dict, problems: list) -> None:
+    if not isinstance(poke, dict):
+        problems.append(f"{where} must be an object")
+        return
+    unknown = sorted(set(poke) - POKE_KEYS)
+    if unknown:
+        problems.append(f"{where}: unknown keys {unknown}")
+    if not state_given:
+        problems.append(f"{where} requires scenario.state (for symbol resolution)")
+    kind = None
+    if "field" in poke:
+        direct = sorted(set(poke) & POKE_DIRECT_KEYS)
+        if direct:
+            problems.append(f"{where}: 'field' cannot be combined with {direct} "
+                            f"(use either field, or symbol/offset/type)")
+        if state_given:
+            name = poke["field"]
+            if not isinstance(name, str) or name not in fields:
+                problems.append(f"{where}: field {name!r} is not in state.fields")
+            else:
+                try:
+                    _, _, kind = field_parts(fields[name], default_symbol)
+                except (KeyError, TypeError, ValueError):
+                    pass  # the field's own spec is already reported under state.fields
+    else:
+        if state_given and poke.get("symbol", default_symbol) not in aliases:
+            problems.append(f"{where}: symbol {poke.get('symbol', default_symbol)!r} not in state.symbols {sorted(aliases)}")
+        kind = poke.get("type", DEFAULT_TYPE)
+        if kind not in MEMORY_TYPES:
+            problems.append(f"{where}: unknown type {kind!r}")
+            kind = None
+        if not _is_int(poke.get("offset")):
+            problems.append(f"{where}: integer offset required")
+    if not _is_int(poke.get("value")):
+        problems.append(f"{where}: integer value required")
+    elif kind in TYPE_RANGES and not TYPE_RANGES[kind][0] <= poke["value"] <= TYPE_RANGES[kind][1]:
+        problems.append(f"{where}: value {poke['value']} does not fit {kind}")
+
+
 def validate_scenario(scenario) -> None:
     """Reject a malformed scenario before the emulator starts (raises ScenarioError)."""
     problems: list[str] = []
@@ -364,26 +405,17 @@ def validate_scenario(scenario) -> None:
                     if key in wait and not _is_int(wait[key]):
                         problems.append(f"{where}.wait_until.{key} must be an integer")
         if "poke" in step:
-            poke = step["poke"]
-            if not isinstance(poke, dict):
-                problems.append(f"{where}.poke must be an object")
+            # One poke object, or a list of them written in order within this step.
+            pokes = step["poke"]
+            if isinstance(pokes, list):
+                if not pokes:
+                    problems.append(f"{where}.poke: list must not be empty")
+                for j, poke in enumerate(pokes):
+                    _check_poke(poke, f"{where}.poke[{j}]", state is not None, aliases,
+                                default_symbol, fields, problems)
             else:
-                unknown = sorted(set(poke) - POKE_KEYS)
-                if unknown:
-                    problems.append(f"{where}.poke: unknown keys {unknown}")
-                if state is None:
-                    problems.append(f"{where}.poke requires scenario.state (for symbol resolution)")
-                elif poke.get("symbol", default_symbol) not in aliases:
-                    problems.append(f"{where}.poke: symbol {poke.get('symbol', default_symbol)!r} not in state.symbols {sorted(aliases)}")
-                kind = poke.get("type", DEFAULT_TYPE)
-                if kind not in MEMORY_TYPES:
-                    problems.append(f"{where}.poke: unknown type {kind!r}")
-                if not _is_int(poke.get("offset")):
-                    problems.append(f"{where}.poke: integer offset required")
-                if not _is_int(poke.get("value")):
-                    problems.append(f"{where}.poke: integer value required")
-                elif kind in TYPE_RANGES and not TYPE_RANGES[kind][0] <= poke["value"] <= TYPE_RANGES[kind][1]:
-                    problems.append(f"{where}.poke: value {poke['value']} does not fit {kind}")
+                _check_poke(pokes, f"{where}.poke", state is not None, aliases,
+                            default_symbol, fields, problems)
     if "start_state" in scenario:
         _check_name(scenario["start_state"], "start_state", problems)
 
@@ -626,6 +658,18 @@ def field_parts(spec, default_symbol: str) -> tuple[str, int, str]:
 def read_field(lib, bases: dict, spec, default_symbol: str) -> int:
     symbol, offset, kind = field_parts(spec, default_symbol)
     return read_typed(lib, bases[symbol] + offset, kind)
+
+
+def poke_target(poke: dict, default_symbol: str, fields: dict) -> tuple:
+    """(field name or None, symbol alias, offset, type) that a poke writes to.
+
+    A poke is either {symbol, offset, type, value} or {field, value}, where the
+    field is a state.fields entry resolved exactly as read_field does it.
+    """
+    if "field" in poke:
+        symbol, offset, kind = field_parts(fields[poke["field"]], default_symbol)
+        return poke["field"], symbol, offset, kind
+    return None, poke.get("symbol", default_symbol), int(poke["offset"]), poke.get("type", DEFAULT_TYPE)
 
 
 def read_state(lib, bases: dict, fields: dict, default_symbol: str) -> dict:
@@ -954,15 +998,17 @@ def run(rom: Path, rom_sha: str, scenario_path: Path, output: Path, lib, opts: d
             release_touch()
             event(index, "release")
         if "poke" in step:
-            poke = step["poke"]
-            alias = poke.get("symbol", default_symbol)
-            kind = poke.get("type", DEFAULT_TYPE)
-            address = state_bases[alias] + int(poke["offset"])
-            write_typed(lib, address, kind, int(poke["value"]))
-            if "poke" not in unsafe:
-                unsafe.append("poke")
-            event(index, "poke", symbol=alias, offset=int(poke["offset"]), type=kind,
-                  value=int(poke["value"]), address=f"0x{address:08x}")
+            pokes = step["poke"] if isinstance(step["poke"], list) else [step["poke"]]
+            for poke in pokes:
+                name, alias, offset, kind = poke_target(poke, default_symbol, fields)
+                value = int(poke["value"])
+                address = state_bases[alias] + offset
+                write_typed(lib, address, kind, value)
+                if "poke" not in unsafe:
+                    unsafe.append("poke")
+                extra = {} if name is None else {"field": name}
+                event(index, "poke", symbol=alias, offset=offset, type=kind, value=value,
+                      address=f"0x{address:08x}", **extra)
 
         seq_name = step.get("capture_sequence")
         every = max(1, int(step.get("capture_every", 1)))

@@ -137,6 +137,7 @@ screen at y >= 192, so subtract 192 from a capture y. `tap` holds until
 - `MODE_FB0/FB1` shows a raw VRAM bank and disables BGs, sprites and 3D on that engine.
 - Measure on the DS. A feature that looks fine but drops below 60 FPS on the
   console is not done.
+- **NitroFS & audio (`references/nitrofs-audio.md`):** keep static `ewram` under 4 MB by placing BGM streams (`mmStreamOpen` from `nitro:/`) and per-biome assets in `NITROFSDIR`, and Maxmod SFX banks in `AUDIODIRS` (`-lmm9 -lnds9`).
 
 ## Hardware loop (detail: `references/hardware-workflow.md`)
 

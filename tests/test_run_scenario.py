@@ -215,6 +215,83 @@ class ValidationTest(unittest.TestCase):
         self.assertIn("save_state", problems_of(scenario(steps=[{"save_state": "a b"}])))
 
 
+class PokeTest(unittest.TestCase):
+    STATE = {"symbols": {"sb": "g_sandbox", "nav": "g_nav"}, "default_symbol": "sb",
+             "fields": {"seq": {"symbol": "sb", "offset": 0, "type": "u8"},
+                        "player_x": {"symbol": "nav", "offset": 8, "type": "s32"},
+                        "bare": 4}}
+
+    def poke_scenario(self, poke):
+        return scenario(state=self.STATE, steps=[{"poke": poke}, {"frames": 1, "capture": "a"}, {"capture": "b"}])
+
+    def test_poke_list_is_valid(self):
+        data = self.poke_scenario([{"field": "player_x", "value": 384}, {"offset": 4, "value": 1}])
+        self.assertEqual(problems_of(data), "")
+
+    def test_poke_list_errors_name_the_element(self):
+        data = self.poke_scenario([{"offset": 1, "value": 2}, {"offset": 1, "value": 300, "type": "u8"}])
+        text = problems_of(data)
+        self.assertIn("step 0.poke[1]: value 300 does not fit u8", text)
+        self.assertNotIn("step 0.poke[0]", text)
+
+    def test_empty_poke_list_is_rejected(self):
+        self.assertIn("list must not be empty", problems_of(self.poke_scenario([])))
+
+    def test_poke_list_element_must_be_object(self):
+        self.assertIn("step 0.poke[0] must be an object", problems_of(self.poke_scenario([5])))
+
+    def test_single_object_form_is_unchanged(self):
+        self.assertEqual(problems_of(self.poke_scenario({"offset": 0, "type": "u8", "value": 7})), "")
+        self.assertIn("step 0.poke must be an object", problems_of(self.poke_scenario(3)))
+        self.assertIn("step 0.poke: unknown keys ['bogus']",
+                      problems_of(self.poke_scenario({"offset": 0, "value": 1, "bogus": 2})))
+        self.assertIn("step 0.poke: integer value required", problems_of(self.poke_scenario({"offset": 0})))
+
+    def test_valid_field_poke(self):
+        self.assertEqual(problems_of(self.poke_scenario({"field": "player_x", "value": -1})), "")
+        self.assertEqual(problems_of(self.poke_scenario({"field": "seq", "value": 255})), "")
+
+    def test_unknown_field(self):
+        text = problems_of(self.poke_scenario({"field": "playr_x", "value": 1}))
+        self.assertIn("step 0.poke: field 'playr_x' is not in state.fields", text)
+
+    def test_field_mixed_with_addressing_keys(self):
+        for extra in ({"offset": 0}, {"symbol": "sb"}, {"type": "u8"}):
+            text = problems_of(self.poke_scenario({"field": "seq", "value": 1, **extra}))
+            self.assertIn("'field' cannot be combined with", text, extra)
+
+    def test_field_value_checked_against_field_type(self):
+        self.assertIn("value 256 does not fit u8", problems_of(self.poke_scenario({"field": "seq", "value": 256})))
+        self.assertIn("value 2147483648 does not fit s32",
+                      problems_of(self.poke_scenario({"field": "player_x", "value": 2147483648})))
+
+    def test_field_poke_requires_state(self):
+        data = scenario(steps=[{"poke": {"field": "x", "value": 1}}, {"capture": "a"}, {"capture": "b"}])
+        self.assertIn("requires scenario.state", problems_of(data))
+
+    def test_poke_list_in_a_step_validates_every_element(self):
+        data = scenario(state=self.STATE, steps=[{"poke": [{"field": "seq", "value": 1},
+                                                            {"field": "nope", "value": 1}]},
+                                                  {"capture": "a"}, {"capture": "b"}])
+        self.assertIn("step 0.poke[1]: field 'nope' is not in state.fields", problems_of(data))
+
+    def test_poke_target_resolves_field_like_read_field(self):
+        fields = self.STATE["fields"]
+        self.assertEqual(rs.poke_target({"field": "player_x", "value": 1}, "sb", fields),
+                         ("player_x", "nav", 8, "s32"))
+        self.assertEqual(rs.poke_target({"field": "bare", "value": 1}, "sb", fields),
+                         ("bare", "sb", 4, "s32"))
+        self.assertEqual(rs.poke_target({"offset": 2, "type": "u16", "value": 1}, "sb", fields),
+                         (None, "sb", 2, "u16"))
+
+    def test_field_poke_writes_the_field_address(self):
+        lib = FakeLib(bytes(32))
+        name, alias, offset, kind = rs.poke_target({"field": "player_x", "value": -2}, "sb", self.STATE["fields"])
+        bases = {"sb": 0, "nav": 16}
+        rs.write_typed(lib, bases[alias] + offset, kind, -2)
+        self.assertEqual(rs.read_typed(lib, 24, "s32"), -2)
+
+
 class ClassifyAndExitTest(unittest.TestCase):
     def ctx(self, **extra):
         data = {"error": None, "failed": [], "warnings": [], "assertion_count": 1, "scenario": {"steps": []}}

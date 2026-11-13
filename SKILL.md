@@ -102,6 +102,8 @@ change. Skip a level only if its prerequisite does not exist, and say so.
   test, and name captures after what they show.
 - No synthetic mockups presented as game evidence. Contact sheets, crops or GIFs
   assembled from real captures are fine if labelled as derived.
+- To stage a scene for captures (many fields at once), use a sandbox-variant
+  mailbox written by `poke` lists: `references/sandbox-pattern.md`.
 - Report facts, inferences and unverified (hardware) items separately.
 - UI changes: capture the initial state, perform the real gesture, capture the
   result, review layout, clipping and hitboxes against the project's `DESIGN.md`,

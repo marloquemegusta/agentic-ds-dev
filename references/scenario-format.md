@@ -35,7 +35,7 @@ Unknown step keys are rejected, as are combinations that silently do nothing:
 | `tap_grid` | `{count, columns, x, y, spacing_x, spacing_y, hold, hold_frames, gap_frames}` taps `count` points row by row from `(x, y)`; each tap holds the `hold` buttons for `hold_frames` (default 2), then releases for `gap_frames` (default 1). |
 | `drag` | `{from:{x,y}, to:{x,y}, frames}` interpolated touch drag, one frame per point. |
 | `release` | Release the touch. |
-| `poke` | `{symbol, offset, type, value}` write memory (test setup). `symbol` is a `state.symbols` alias (default `default_symbol`), `type` as for fields. Marks the input trace `replay_safe: false`. |
+| `poke` | Write memory (test setup). One object `{symbol, offset, type, value}`, or `{field, value}` naming a `state.fields` entry (its symbol, offset and type are used; `field` cannot be mixed with `symbol`/`offset`/`type`). `symbol` is a `state.symbols` alias (default `default_symbol`), `type` as for fields (default `s32`). A list of such objects is written in order, all within this step and before `frames`. Each write emits a `poke` event (with `field` when used) and marks the input trace `replay_safe: false`. Pattern: `sandbox-pattern.md`. |
 | `frames` | Frames to advance (default 1; default 0 in a step with `wait_until`). The held keypad is re-asserted every frame. |
 | `wait_until` | `{field, <equals\|not_equals\|min_value\|max_value>, timeout_frames}` runs frame by frame (after `frames`) until the `state` field satisfies every check. Timeout = scenario FAIL `wait_until:<field>` and the run stops there. The event records `waited_frames`. |
 | `capture_sequence` + `capture_every` | Save `NAME_0000.png`, `NAME_0001.png`, ... every N frames of this step (filmstrip). |
@@ -135,6 +135,45 @@ small (about 5-10% on dungeonds, where ARM emulation dominates).
   }
 }
 ```
+
+## Poke lists by field
+
+Filling a whole structure in one frame: a `poke` list writes its elements in
+order, `field` names a `state.fields` entry, and `seq` is incremented last so the
+game sees a complete record. Then `wait_until` on the game's `ack`.
+
+```json
+{
+  "name": "sandbox_fill",
+  "state": {
+    "elf": "../build/game-sandbox.elf",
+    "symbols": { "box": "g_sandbox" },
+    "default_symbol": "box",
+    "fields": {
+      "seq": 0, "ack": 4,
+      "enemy0_x": 8, "enemy0_hp": 12,
+      "player_x": 16
+    }
+  },
+  "steps": [
+    { "poke": [
+        { "field": "player_x", "value": 384 },
+        { "field": "enemy0_x", "value": 512 },
+        { "field": "enemy0_hp", "value": 3 },
+        { "field": "seq", "value": 1 }
+      ],
+      "frames": 0 },
+    { "wait_until": { "field": "ack", "equals": 1, "timeout_frames": 60 },
+      "capture": "filled", "state_capture": "filled" }
+  ],
+  "assertions": {
+    "state_changes": [{ "at": "filled", "field": "enemy0_hp", "equals": 3 }]
+  }
+}
+```
+
+Errors name the element: `step 0.poke[2]: value 300 does not fit u8`. Full pattern
+and the build variant that carries the mailbox: `sandbox-pattern.md`.
 
 ## Command line and results
 

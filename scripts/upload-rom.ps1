@@ -1,7 +1,8 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string]$ProjectPath,
-    [Parameter(Mandatory)] [string]$RomPath,
+    # Defaults to the project's "rom" from .ds-game-dev/project.json.
+    [string]$RomPath,
     [switch]$ConfirmUpload,
     # Runs the ROM checks (sha, stale, variant) and stops before touching the network.
     [switch]$DryRun,
@@ -26,6 +27,11 @@ $paramMap = @{ HostName = 'host'; Port = 'port'; RemoteDirectory = 'remoteDirect
 foreach ($name in $paramMap.Keys) { if ($PSBoundParameters.ContainsKey($name)) { $overrides[$paramMap[$name]] = $PSBoundParameters[$name] } }
 $ftp = Get-DsFtpSettings -ProjectPath $ProjectPath -Overrides $overrides
 
+$projectFull = (Resolve-Path -LiteralPath $ProjectPath).Path.TrimEnd('\')
+$config = Get-DsProjectConfig $projectFull
+if (-not $RomPath) { $RomPath = Get-DsRomPath $config $projectFull }
+if (-not $RomPath) { throw 'Falta -RomPath (o "rom" en .ds-game-dev/project.json).' }
+
 $rom = (Resolve-Path -LiteralPath $RomPath).Path
 $romItem = Get-Item -LiteralPath $rom
 $localSize = $romItem.Length
@@ -35,11 +41,9 @@ $remote = "$base/$($ftp.remoteName)"
 
 # A stale ROM or one from another checkout is the usual reason the user sees
 # "the DS doesn't have my changes"; refuse before touching the network.
-$projectFull = (Resolve-Path -LiteralPath $ProjectPath).Path.TrimEnd('\')
 if (-not $rom.StartsWith("$projectFull\", [StringComparison]::OrdinalIgnoreCase)) {
     Write-Warning "La ROM no esta dentro de ${projectFull}: comprueba que es la del worktree en el que trabajas."
 }
-$config = Get-DsProjectConfig $projectFull
 $variant = 'unknown'
 $infoPath = Get-DsBuildInfoPath $projectFull $rom
 if (Test-Path -LiteralPath $infoPath) {

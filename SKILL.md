@@ -35,12 +35,11 @@ offline run). Setup details: `README.md`.
 | `run-scenario.ps1` | `-ScenarioPath [-ProjectPath] [-RomPath] [-OutputPath] [-MapPath] [-StatesDir] [-Jit] [-NoSkipRender]`; `DSM_SCENARIO_RESULT=` |
 | `run-scenarios.ps1` | `-ProjectPath [-Filter 'wild*'] [-Tag] [-RomPath] [-OutputPath] [-StatesDir] ...`; one process, `DSM_SUITE_RESULT=`, `DS_SUITE_NONPASS=` |
 | `validate-gdb.ps1` | `-RomPath [-ProjectPath] [-ElfPath] [-Breakpoint main] [-Port] [-Frames] [-TimeoutSeconds]` |
-| `upload-rom.ps1` | `-ProjectPath -RomPath (-ConfirmUpload \| -DryRun) [-RemoteName]`; `FTP_UPLOAD_RESULT=` |
+| `upload-rom.ps1` | `-ProjectPath [-RomPath] (-ConfirmUpload \| -DryRun) [-RemoteName]`; `FTP_UPLOAD_RESULT=` |
 | `fetch-device-log.ps1` | `-ProjectPath -RemoteFile /x.log [-OutDir] [-Delete]`; `DEVICE_LOG_RESULT=` |
 | `setup.ps1`, `build-runtime.ps1` | Install / rebuild the DeSmuME runtime (`README.md`, `references/desmume-agent.md`) |
 
-`run-scenario(s)` default the ROM to `project.json` `rom`. Exit codes: 0 pass,
-1 fail or no assertions, 2 error. Scenario format: `references/scenario-format.md`.
+`run-scenario(s)` and `upload-rom.ps1` default the ROM to `project.json` `rom`. Always invoke PowerShell scripts with `powershell -NonInteractive -ExecutionPolicy Bypass -File ...` so a missing parameter fails fast instead of hanging on stdin. Exit codes: 0 pass, 1 fail or no assertions, 2 error. Scenario format: `references/scenario-format.md`.
 The first WSL call can cost ~30 s (cold start); the scripts keep WSL warm after that.
 
 ## Project contract: `.ds-game-dev/project.json`
@@ -155,7 +154,7 @@ about audio, timing or hardware. Hardware-only crashes: the `ds_crash` log on th
 
 - Only after explicit user confirmation, valid for that one upload. Run
   `upload-rom.ps1 ... -DryRun` first (checks sha, staleness, variant), then
-  `-ConfirmUpload`. Upload the ROM built from the worktree you worked in.
+  `-ConfirmUpload` (with `powershell -NonInteractive -ExecutionPolicy Bypass -File scripts/upload-rom.ps1 -ProjectPath <worktree> -ConfirmUpload`). Upload the ROM built from the worktree you worked in.
 - It refuses `ROM_UNKNOWN` (sha differs from the last build) and `ROM_STALE`.
   `FTP_UNREACHABLE` means the DS is not running its FTP server: ask the user to
   open it; do not retry blindly. Settings come from `config/ftp.json`, the

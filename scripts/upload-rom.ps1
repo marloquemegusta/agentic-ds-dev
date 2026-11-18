@@ -4,6 +4,8 @@ param(
     # Defaults to the project's "rom" from .ds-game-dev/project.json.
     [string]$RomPath,
     [switch]$ConfirmUpload,
+    # Tope de la subida en segundos (por defecto 90; subir a 240 si la red va lenta).
+    [int]$MaxTimeSeconds = 90,
     # Runs the ROM checks (sha, stale, variant) and stops before touching the network.
     [switch]$DryRun,
     [string]$HostName,
@@ -94,7 +96,7 @@ Write-Host "Subiendo $rom ($localSize bytes, compilada hace $romAge min) a $remo
 # is judged by its exit code instead, and --silent drops the progress meter.
 $auth = "$($ftp.user):$($ftp.password)"
 $ErrorActionPreference = 'Continue'
-& $curl.Source --connect-timeout 8 --max-time 90 --fail --silent --show-error --ftp-pasv --user $auth --upload-file $rom $remote 2>&1 | ForEach-Object { "$_" }
+& $curl.Source --connect-timeout 8 --max-time $MaxTimeSeconds --fail --silent --show-error --ftp-pasv --user $auth --upload-file $rom $remote 2>&1 | ForEach-Object { "$_" }
 $uploadExit = $LASTEXITCODE
 $head = if ($uploadExit -eq 0) { & $curl.Source --connect-timeout 8 --max-time 20 --fail --silent --show-error --ftp-pasv --user $auth --head $remote 2>&1 | ForEach-Object { "$_" } }
 $headExit = $LASTEXITCODE

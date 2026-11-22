@@ -4,8 +4,8 @@ param(
     # Defaults to the project's "rom" from .ds-game-dev/project.json.
     [string]$RomPath,
     [switch]$ConfirmUpload,
-    # Tope de la subida en segundos (por defecto 90; subir a 240 si la red va lenta).
-    [int]$MaxTimeSeconds = 90,
+    # Tope de la subida en segundos (por defecto 240 para ROMs pesadas o redes lentas).
+    [int]$MaxTimeSeconds = 240,
     # Runs the ROM checks (sha, stale, variant) and stops before touching the network.
     [switch]$DryRun,
     [string]$HostName,

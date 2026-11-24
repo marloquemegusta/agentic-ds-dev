@@ -48,7 +48,7 @@ done
 cp "$patchesWsl/gdb_agent.cpp" "$patchesWsl/gdb_thread.cpp" desmume/src/frontend/interface/
 rm -rf "`$BLD"
 cd desmume/src/frontend/interface
-meson setup "`$BLD" -Dfrontend-gtk=false -Dfrontend-cli=false -Dwifi=false -Dgdb-stub=true >/dev/null
+meson setup "`$BLD" -Dbuildtype=release -Dfrontend-gtk=false -Dfrontend-cli=false -Dwifi=false -Dgdb-stub=true >/dev/null
 ninja -C "`$BLD"
 cp -f "`$BLD/libdesmume.so" "$binWsl/libdesmume.so"
 "@

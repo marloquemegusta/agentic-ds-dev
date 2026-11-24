@@ -198,6 +198,12 @@ DSM_SCENARIO_ERROR=<stem>: <message>
 DSM_SUITE_RESULT=<PASS|FAIL|ERROR> total=N pass=N fail=N error=N wall_ms=N     (several scenarios only)
 ```
 
+`run-scenarios.ps1` splits the suite over `-Parallel N` simultaneous runner processes (default
+min(scenarios, cores/2, 4); `1` = a single process). Scenarios linked by `save_state`/`start_state`
+share a worker and run in order; all workers share `<out>/_states`. The output layout is the same as
+a single process (`<out>/<stem>/`, merged `suite.json`, one aggregated `DSM_SUITE_RESULT`). Measured
+on 22 cores: 4-8 workers give ~3-4x; beyond that the gain flattens.
+
 Exit code: 0 all PASS, 1 any FAIL / NO_ASSERTIONS, 2 any ERROR (dominates).
 `ERROR` = the scenario could not run (invalid scenario, `map_mismatch`,
 `ambiguous_symbol`, `symbol_not_found`, `state_missing`, `state_rom_mismatch`,

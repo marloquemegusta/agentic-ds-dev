@@ -117,7 +117,7 @@ def png_bytes(rgb: bytes) -> bytes:
 
     return (b"\x89PNG\r\n\x1a\n" +
             chunk(b"IHDR", struct.pack(">IIBBBBB", WIDTH, HEIGHT, 8, 2, 0, 0, 0)) +
-            chunk(b"IDAT", zlib.compress(rows, 6)) + chunk(b"IEND", b""))
+            chunk(b"IDAT", zlib.compress(rows, 1)) + chunk(b"IEND", b""))
 
 
 def count_changed_pixels(first: bytes, second: bytes) -> int:

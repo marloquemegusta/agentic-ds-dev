@@ -30,10 +30,11 @@ offline run). Setup details: `README.md`.
 | :--- | :--- |
 | `check-toolchain.ps1` | `[-ProjectPath]`; `DS_CHECK` lines, `DS_TOOLCHAIN=PASS\|INCOMPLETE` |
 | `scaffold-project.ps1` | `-ProjectPath [-Title]`; layout, `project.json`, starter ROM source, smoke scenario, C test |
-| `build-project.ps1` | `-ProjectPath [-Variant name] [-Define NAME=VAL] [-OutputRom] [-Clean]`; `DS_BUILD=PASS ... warnings= new_warnings=` |
+| `build-project.ps1` | `-ProjectPath [-Variant a[,b,c]] [-Define NAME=VAL] [-OutputRom] [-Clean]`; `DS_BUILD=PASS ... warnings= new_warnings= seconds=` (varias variantes: `DS_BUILD_ALL=`) |
 | `run-host-tests.ps1` | `-ProjectPath [-Filter] [-TailLines]`; `DS_HOST_TESTS=PASS\|FAIL` |
 | `run-scenario.ps1` | `-ScenarioPath [-ProjectPath] [-RomPath] [-OutputPath] [-MapPath] [-StatesDir] [-Jit] [-NoSkipRender]`; `DSM_SCENARIO_RESULT=` |
 | `run-scenarios.ps1` | `-ProjectPath [-Filter 'wild*'] [-Tag] [-RomPath] [-OutputPath] [-StatesDir] ...`; one process, `DSM_SUITE_RESULT=`, `DS_SUITE_NONPASS=` |
+| `look.py` | `python look.py <out_dir> [--screen top\|bottom\|both] [--crop x,y,w,h] [--scale N] [--sheet] [--match GLOB] [--gif] [--fps 15] [--out DIR]`; PNG/crop x scale (NEAREST)/contact sheet/GIF + PASS/FAIL summary; `-Look` on `run-scenario(s).ps1` runs it with `--sheet` |
 | `validate-gdb.ps1` | `-RomPath [-ProjectPath] [-ElfPath] [-Breakpoint main] [-Port] [-Frames] [-TimeoutSeconds]` |
 | `upload-rom.ps1` | `-ProjectPath [-RomPath] (-ConfirmUpload \| -DryRun) [-RemoteName]`; `FTP_UPLOAD_RESULT=` |
 | `fetch-device-log.ps1` | `-ProjectPath -RemoteFile /x.log [-OutDir] [-Delete]`; `DEVICE_LOG_RESULT=` |
@@ -59,9 +60,8 @@ The first WSL call can cost ~30 s (cold start); the scripts keep WSL warm after 
 
 Build products: the ROM plus `.ds-game-dev/build/out/<rom stem>.{elf,map,buildinfo.json}`
 (sha256, variant, defines, warning totals). Scenarios and GDB resolve symbols from
-them and refuse a mismatching ROM. The build is incremental (~3-4 s no-op, ~6-7 s
-clean for a mid-size game); the warning ledger reports the total even on
-incremental builds. New project: ask before scaffolding, then draft the project's
+them and refuse a mismatching ROM. The build is incremental and compiles in a Docker volume per variant (`dsbuild-<hash>-<variant>`, container `dsb-<hash>-<variant>`), not on the Windows tree: ~2-3 s unchanged, ~4-5 s touching one file, ~11 s clean. Several variants at once: `-Variant default,perf,sandbox` (in parallel). If Docker resets or `.ds-game-devuild` is deleted, the next build rebuilds the volume by itself. Cleanup: `docker rm -f $(docker ps -aq --filter name=dsb-)` and `docker volume rm $(docker volume ls -q --filter name=dsbuild-)`. The ROM is not byte-identical to those of the old script (link order changed) but is stable between new builds. `DS_BUILD_TRACE=1` shows per-phase times. The warning ledger reports the total even on incremental builds. The emulator is a release build (~120 fps); `run-scenarios.ps1 -Parallel N` splits the suite (default automatic, 1 = serial). 
+New project: ask before scaffolding, then draft the project's
 `AGENTS.md`/`DESIGN.md` and wait for approval. For walkthroughs and status
 documents follow the project's `AGENTS.md`.
 
@@ -94,6 +94,9 @@ change. Skip a level only if its prerequisite does not exist, and say so.
 - Read `result.json` first (status, failed checks with expected/actual,
   warnings), then `debug.log` (ROM `DS_LOG` output), then captures, only when an
   assertion cannot express the check. Do not read full manifests by default.
+- To look at captures use `scripts/look.py` (or `-Look` on the run scripts), not ad-hoc
+  PIL scripts: one call gives the crop (DS pixels, 256x192 per screen), NEAREST scaling,
+  a labelled contact sheet or a GIF (>=15 fps) plus the PASS/FAIL summary. Then `Read` the images.
 - `NO_ASSERTIONS` is a failure unless the scenario sets `evidence_only`, and an
   evidence-only run proves nothing.
 - Assert state, not pixels: expose a `g_probe`-style struct (template

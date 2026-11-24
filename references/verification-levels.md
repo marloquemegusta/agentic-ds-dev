@@ -5,7 +5,7 @@ change-type mapping are in `SKILL.md`; this file gives the detail.
 
 | Level | Commands | Typical cost | Proves | Does not prove |
 | :--- | :--- | :--- | :--- | :--- |
-| L0 build | `build-project.ps1 -ProjectPath P` | 3-4 s no-op, 6-7 s clean (mid-size game); first run after Docker start is slower | Compiles, links, `new_warnings=0`; writes ELF/map/buildinfo sidecars | Any behaviour |
+| L0 build | `build-project.ps1 -ProjectPath P` | ~2-3 s no-op, ~4-5 s with 1 file, ~11 s clean (mid-size game); first run after Docker start is slower | Compiles, links, `new_warnings=0`; writes ELF/map/buildinfo sidecars | Any behaviour |
 | L1 host tests | `run-host-tests.ps1 -ProjectPath P [-Filter f]` | seconds per C test; ~30 s extra on a cold WSL | Pure logic, with ASan/UBSan, on the host | Anything that touches libnds, timing or rendering; Python mirrors of C code test the mirror, not the C |
 | L2 scenario | `run-scenario.ps1 -ProjectPath P -ScenarioPath S` | wall time ~ frames / 70-80 per second, plus start-up | The asserted state transitions through real input in the real ROM; `debug.log` shows what the ROM reported | Anything not asserted; performance; audio |
 | L3 suite | `run-scenarios.ps1 -ProjectPath P` | sum of scenarios, one process | No regression across scenarios | Hardware behaviour |

@@ -7,8 +7,10 @@ scenario runner (`runtime/run_scenario.py`) and the evidence format
 
 ## Capabilities and limits
 
-- Headless, audio disabled, ARM9 GDB stub. Interpreter speed is roughly 70-80
-  emulated frames per second.
+- Headless, audio disabled, ARM9 GDB stub. Interpreter speed is roughly 120-130
+  emulated frames per second (measured: 568 frames with captures in ~4.5 s). The library is built with
+  meson `-Dbuildtype=release` (`build-runtime.ps1`); the old `debug` (-O0) build ran 2-2.5x slower
+  (~50-80 fps) with identical pixels.
 - Exports `desmume_agent_version()` (`"agent-2"`; `check-toolchain.ps1` prints it),
   `desmume_agent_debug_read`, `desmume_agent_set_jit`, `desmume_agent_set_rtc_fixed`.
 - **Debug capture:** text the ROM writes to the no$gba debug registers
@@ -35,7 +37,7 @@ scenario runner (`runtime/run_scenario.py`) and the evidence format
 .\scripts\validate-gdb.ps1  -RomPath <rom> -ProjectPath <repo>
 ```
 
-Read `result.json` first, then `debug.log`, then captures (`SKILL.md`, evidence rules).
+Read `result.json` first, then `debug.log`, then captures (`SKILL.md`, evidence rules). To look at captures use `scripts/look.py` (or `-Look`), not ad-hoc PIL scripts.
 
 ## Rebuilding the runtime
 

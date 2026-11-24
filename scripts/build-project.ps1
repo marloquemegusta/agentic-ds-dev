@@ -6,7 +6,8 @@ param(
     [switch]$Clean,
     # Build variant. 'default' is the shipping build; others (e.g. 'perf') add
     # the defines of project.json "variants".<name>.defines to the compile.
-    [string]$Variant = 'default',
+    # Several variants (-Variant a,b,c) are built in parallel, one process each.
+    [string[]]$Variant = @('default'),
     # Extra defines, e.g. -Define PERF_PROFILE=1 (passed as -DNAME=VALUE).
     [string[]]$Define = @()
 )
@@ -14,9 +15,43 @@ param(
 $ErrorActionPreference = 'Stop'
 $stopwatch = [Diagnostics.Stopwatch]::StartNew()
 $skillRoot = Split-Path -Parent $PSScriptRoot
+function Write-Trace([string]$What) { if ($env:DS_BUILD_TRACE) { [Console]::Error.WriteLine(('[trace {0:N1}s] {1}' -f $stopwatch.Elapsed.TotalSeconds, $What)) } }
 . (Join-Path $PSScriptRoot 'project-common.ps1')
 
 $project = (Resolve-Path -LiteralPath $ProjectPath).Path.TrimEnd('\')
+
+# -Variant a,b,c: one child process per variant (own volume, container and
+# output files), all at once. Prints each child's output and fails if any did.
+$Variant = @($Variant | ForEach-Object { $_ -split ',' } | Where-Object { $_ } | Select-Object -Unique)
+if ($Variant.Count -eq 0) { $Variant = @('default') }
+if ($Variant.Count -gt 1) {
+    if ($OutputRom) { throw '-OutputRom no se puede combinar con varias variantes.' }
+    if ($Define.Count -gt 0) { throw '-Define no se puede combinar con varias variantes.' }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("dsbuild-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $jobs = foreach ($v in $Variant) {
+        if ($v -notmatch '^[A-Za-z0-9_-]+$') { throw "Nombre de variante no valido: $v" }
+        $argList = @('-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-ProjectPath', "`"$project`"", '-Variant', $v)
+        if ($Clean) { $argList += '-Clean' }
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -NoNewWindow -PassThru `
+            -RedirectStandardOutput (Join-Path $tmp "$v.out") -RedirectStandardError (Join-Path $tmp "$v.err")
+        $null = $proc.Handle   # keeps ExitCode readable after the process ends
+        [pscustomobject]@{ Variant = $v; Proc = $proc }
+    }
+    $failed = 0
+    foreach ($j in $jobs) {
+        $j.Proc.WaitForExit()
+        Get-Content -LiteralPath (Join-Path $tmp "$($j.Variant).out") | Write-Output
+        Get-Content -LiteralPath (Join-Path $tmp "$($j.Variant).err") | Write-Output
+        if ($j.Proc.ExitCode -ne 0) { $failed++ }
+    }
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    $total = [Math]::Round($stopwatch.Elapsed.TotalSeconds)
+    Write-Output "DS_BUILD_ALL=$(if ($failed) { 'FAIL' } else { 'PASS' }) variants=$($Variant -join ',') failed=$failed seconds=$total"
+    if ($failed) { exit 1 }
+    exit 0
+}
+[string]$Variant = $Variant[0]
 if ($Variant -notmatch '^[A-Za-z0-9_-]+$') { throw "Nombre de variante no valido: $Variant" }
 $config = Get-DsProjectConfig $project
 $configPath = Join-Path $project '.ds-game-dev\project.json'
@@ -47,16 +82,18 @@ $cflags = ($defineList | ForEach-Object { if ($_.StartsWith('-')) { $_ } else { 
 # Native commands write to stderr on failure; under 'Stop' Windows PowerShell
 # 5.1 would turn that into a terminating error before we can explain it.
 $ErrorActionPreference = 'Continue'
-docker info --format '{{.ServerVersion}}' *> $null
-if ($LASTEXITCODE -ne 0) { throw 'Docker no responde. Arranca Docker Desktop y repite la build.' }
 $imageId = docker image inspect $image --format '{{.Id}}' 2>$null
 if ($LASTEXITCODE -ne 0) {
+    # Either the daemon is down or the image is missing: tell them apart.
+    docker info --format '{{.ServerVersion}}' *> $null
+    if ($LASTEXITCODE -ne 0) { throw 'Docker no responde. Arranca Docker Desktop y repite la build.' }
     & (Join-Path $skillRoot 'scripts\load-blocksds-image.ps1')
     $imageId = docker image inspect $image --format '{{.Id}}' 2>$null
     if ($LASTEXITCODE -ne 0) { throw "La imagen BlocksDS no esta cargada y no se pudo cargar desde el paquete offline." }
 }
 $ErrorActionPreference = 'Stop'
 
+Write-Trace 'docker-checks'
 # Incremental build: the variant tree is kept between runs so make only
 # recompiles what changed. It is wiped when anything that is not tracked by
 # make's dependency files changes (template, project contract, image, defines).
@@ -77,6 +114,8 @@ $synced = 0
 $removed = 0
 $inputCount = 0
 $inputsNewest = [DateTime]::MinValue
+$fullPush = [bool]$Clean -or ($previousStamp -ne $stampText)
+$changed = New-Object System.Collections.Generic.HashSet[string]
 # Index of what each build file was copied from ("length:mtime" of the
 # source), kept outside the copied trees so nothing leaks into the ROM.
 $indexPath = Join-Path $buildRoot '.ds-build-index.json'
@@ -97,6 +136,7 @@ function Sync-File([string]$Source, [string]$Destination) {
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
     (Get-Item -LiteralPath $Destination).LastWriteTime = $now
     $index[$Destination] = $signature
+    [void]$script:changed.Add($Destination)
     $script:synced++
 }
 # Mirror a directory: sync every file and drop files no longer in the source.
@@ -112,6 +152,7 @@ function Sync-Tree([string]$Source, [string]$Destination) {
             if (-not $wanted.ContainsKey($file.FullName)) {
                 Remove-Item -LiteralPath $file.FullName -Force
                 $index.Remove($file.FullName)
+                [void]$script:changed.Remove($file.FullName)
                 $script:removed++
             }
         }
@@ -137,7 +178,12 @@ function Sync-All {
     if ($cfg.LastWriteTimeUtc -gt $script:inputsNewest) { $script:inputsNewest = $cfg.LastWriteTimeUtc }
 }
 
+# Id of the container whose volume matches this tree (see the Docker section).
+$markerPath = Join-Path $buildRoot '.ds-build-volume'
+$markerAtStart = if (($Clean -or $previousStamp -ne $stampText) -or -not (Test-Path -LiteralPath $markerPath)) { '' } else { (Get-Content -Raw -LiteralPath $markerPath).Trim() }
+Write-Trace 'stamp-done'
 Sync-All
+Write-Trace 'sync-done'
 if ($removed -gt 0) {
     # A deleted source leaves its object behind and make would not relink,
     # so the ROM would keep the removed code. Deletions are rare: rebuild.
@@ -145,6 +191,8 @@ if ($removed -gt 0) {
     Remove-Item -LiteralPath $buildRoot -Recurse -Force
     New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
     $index = @{}
+    $changed.Clear()
+    $fullPush = $true
     $synced = 0
     $removed = 0
     Sync-All
@@ -152,6 +200,9 @@ if ($removed -gt 0) {
 }
 Set-Content -LiteralPath $stampPath -Value $stampText -NoNewline
 $index | ConvertTo-Json -Compress | Set-Content -LiteralPath $indexPath
+# The index now claims files the volume may not have yet; if this run dies
+# before the push finishes, the missing marker forces a full push next time.
+if ($changed.Count -gt 0 -or $fullPush) { Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue }
 
 # Title/author/icon go to make as command-line variables. Their values travel
 # in environment variables so no quoting is needed on the docker command line.
@@ -167,21 +218,74 @@ if ($config.subtitle) { $env:DS_GAME_SUBTITLE = Format-MakeShellValue "$($config
 if ($config.author)   { $env:DS_GAME_AUTHOR = Format-MakeShellValue "$($config.author)";     $makeVars += ' GAME_AUTHOR=\"$DS_GAME_AUTHOR\"' }
 if ($config.icon)     { $makeVars += ' GAME_ICON=ds-game-icon.png' }
 $env:CFLAGS = $cflags
-$dockerArgs = @('run', '--rm', '-e', 'CFLAGS', '-e', 'DS_GAME_TITLE', '-e', 'DS_GAME_SUBTITLE', '-e', 'DS_GAME_AUTHOR',
-    '-v', "${buildRoot}:/source", '-w', '/source', $image, 'sh', '-c', ('make -j$(nproc) -Otarget' + $makeVars))
 
+# The real build tree lives in a named Docker volume (ext4 inside the Docker
+# VM): make's stat/.d traffic over the Windows bind mount was ~8 s per run.
+# The Windows tree only holds the synced sources, index and stamp. Changed
+# files are streamed into the volume as a tar; outputs are copied back.
+$pathHash = [BitConverter]::ToString([Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($project.ToLowerInvariant()))).Replace('-', '').Substring(0, 10).ToLowerInvariant()
+$volName = "dsbuild-$pathHash-$Variant"
+$ctrName = "dsb-$pathHash-$Variant"
 $logPath = Join-Path $buildRoot 'build.log'
 $logLines = New-Object System.Collections.Generic.List[string]
-$previousEncoding = [Console]::OutputEncoding
+$makeExit = 1
+$mutex = New-Object System.Threading.Mutex($false, "Global\$volName")
+[void]$mutex.WaitOne()
 $ErrorActionPreference = 'Continue'
+$previousEncoding = [Console]::OutputEncoding
 try {
+    # The marker holds the id of the container that owns the volume contents.
+    # Same id still present => the volume is intact (it cannot be removed while
+    # the container exists). Anything else (Docker reset, pruned, first run,
+    # forced rebuild, new stamp, deleted sources) => start from scratch.
+    $state = (docker inspect $ctrName --format '{{.Id}} {{.State.Running}}' 2>$null)
+    $ctrId = ''; $running = $false
+    if ($LASTEXITCODE -eq 0 -and "$state" -match '^(\S+) (\S+)$') { $ctrId = $Matches[1]; $running = ($Matches[2] -eq 'true') }
+    if (-not $ctrId -or $markerAtStart -ne $ctrId) { $fullPush = $true }
+    if ($fullPush) {
+        Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+        docker rm -f $ctrName *> $null
+        docker volume rm -f $volName *> $null
+        docker volume create $volName *> $null
+        if ($LASTEXITCODE -ne 0) { throw "No se pudo crear el volumen $volName" }
+        # /out is the Windows variant tree: only the products are written there.
+        $ctrId = (docker run -d --init --name $ctrName -v "${volName}:/source" -v "${buildRoot}:/out" -w /source $image sleep infinity 2>$null)
+        if ($LASTEXITCODE -ne 0) { throw "No se pudo arrancar el contenedor $ctrName" }
+        $ctrId = "$ctrId".Trim()
+    } elseif (-not $running) {
+        docker start $ctrName *> $null
+        if ($LASTEXITCODE -ne 0) { throw "No se pudo arrancar el contenedor $ctrName" }
+    }
+    Write-Trace 'container-ready'
+    # Push the changed files (all of them on a full push).
+    $pushList = if ($fullPush) { @($index.Keys) } else { @($changed) }
+    if ($pushList.Count -gt 0) {
+        $rootLen = $buildRoot.Length
+        $rel = $pushList | ForEach-Object { $_.Substring($rootLen).TrimStart('\').Replace('\', '/') }
+        $listFile = Join-Path $outDir ".push-$volName.txt"
+        $tarFile = Join-Path $buildRoot '.ds-push.tar'
+        [IO.File]::WriteAllLines($listFile, [string[]]$rel, (New-Object System.Text.UTF8Encoding($false)))
+        & "$env:SystemRoot\System32\tar.exe" -C $buildRoot -cf $tarFile -T $listFile
+        if ($LASTEXITCODE -ne 0) { throw 'tar fallo al empaquetar los fuentes cambiados' }
+        docker exec $ctrName tar -xf /out/.ds-push.tar -C /source --no-same-owner
+        if ($LASTEXITCODE -ne 0) { throw 'no se pudieron extraer los fuentes en el volumen' }
+        Remove-Item -LiteralPath $listFile, $tarFile -Force -ErrorAction SilentlyContinue
+    }
+    Write-Trace 'pushed'
+    [IO.File]::WriteAllText($markerPath, $ctrId, (New-Object System.Text.UTF8Encoding($false)))
+    $dockerArgs = @('exec', '-e', 'CFLAGS', '-e', 'DS_GAME_TITLE', '-e', 'DS_GAME_SUBTITLE', '-e', 'DS_GAME_AUTHOR',
+        '-w', '/source', $ctrName, 'sh', '-c', ('make -j$(nproc) -Otarget' + $makeVars + ' && mkdir -p /out/build && cp -f "' + $config.outputRom + '" /out/ && cp -f build/*.elf build/*.map /out/build/'))
     [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
     & docker @dockerArgs 2>&1 | ForEach-Object { $logLines.Add("$_") }
     $makeExit = $LASTEXITCODE
+    Write-Trace 'make-done'
+    Write-Trace 'outputs-copied'
 } finally {
     [Console]::OutputEncoding = $previousEncoding
     $ErrorActionPreference = 'Stop'
     Remove-Item Env:\CFLAGS, Env:\DS_GAME_TITLE, Env:\DS_GAME_SUBTITLE, Env:\DS_GAME_AUTHOR -ErrorAction SilentlyContinue
+    $mutex.ReleaseMutex()
+    $mutex.Dispose()
 }
 [IO.File]::WriteAllLines($logPath, $logLines, (New-Object System.Text.UTF8Encoding($false)))
 
@@ -202,6 +306,7 @@ if ($makeExit -ne 0) {
     exit 1
 }
 
+Write-Trace 'log-written'
 # Warnings ledger: files recompiled in this run replace their entries, so the
 # total covers the whole ROM even when the build was incremental.
 $ledgerPath = Join-Path $buildRoot '.ds-build-warnings.json'

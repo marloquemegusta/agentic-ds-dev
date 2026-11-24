@@ -10,14 +10,18 @@ param(
     [string]$OutputPath,
     [string]$MapPath,
     [string]$StatesDir,
-    [switch]$Jit,
-    [switch]$NoSkipRender
+    # Simultaneous WSL runner processes. Default: min(scenarios, cores/2, 4). 1 = one sequential process.
+    [int]$Parallel = 0,
+    [switch]$Jit,    [switch]$NoSkipRender,
+    # After the run, build a contact sheet per scenario and print a short summary (scripts\look.py).
+    [switch]$Look
 )
-# Runs every scenario of the project in ONE runner process. Prints DSM_ lines
+# Runs every scenario of the project, in -Parallel simultaneous runner processes (1 = a single one). Prints DSM_ lines
 # and a compact table of the non-passing scenarios. Exit: 0 pass, 1 fail, 2 error.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'wsl-common.ps1')
+. (Join-Path $PSScriptRoot 'wsl-parallel.ps1')
 . (Join-Path $PSScriptRoot 'project-common.ps1')
 
 $project = (Resolve-Path -LiteralPath $ProjectPath).Path.TrimEnd('\')
@@ -45,8 +49,18 @@ if (-not $OutputPath) { $OutputPath = Join-Path $project ('artifacts\suites\' + 
 New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
 $OutputPath = (Resolve-Path -LiteralPath $OutputPath).Path
 
-$exit = Invoke-DsRunner -SkillRoot $root -RomPath $RomPath -ScenarioPaths @($files.FullName) -OutputPath $OutputPath `
-    -MapPath $MapPath -StatesDir $StatesDir -Jit:$Jit -NoSkipRender:$NoSkipRender
+if ($Parallel -le 0) {
+    $cores = [int]$env:NUMBER_OF_PROCESSORS
+    $Parallel = [Math]::Max(1, [Math]::Min([Math]::Min($files.Count, [int][Math]::Floor($cores / 2)), 4))
+}
+$newCli = [bool](Select-String -LiteralPath (Join-Path $root 'runtime\run_scenario.py') -Pattern '--rom' -SimpleMatch -Quiet)
+if ($Parallel -gt 1 -and $files.Count -gt 1 -and $newCli) {
+    $exit = Invoke-DsRunnerParallel -SkillRoot $root -RomPath $RomPath -Files $files -OutputPath $OutputPath -Parallel $Parallel `
+        -MapPath $MapPath -StatesDir $StatesDir -Jit:$Jit -NoSkipRender:$NoSkipRender
+} else {
+    $exit = Invoke-DsRunner -SkillRoot $root -RomPath $RomPath -ScenarioPaths @($files.FullName) -OutputPath $OutputPath `
+        -MapPath $MapPath -StatesDir $StatesDir -Jit:$Jit -NoSkipRender:$NoSkipRender
+}
 
 # Compact table of whatever did not pass, from each scenario's result.json.
 $bad = New-Object System.Collections.Generic.List[string]
@@ -80,4 +94,9 @@ if ($bad.Count -gt 0) {
     $bad | ForEach-Object { Write-Output $_ }
 }
 Write-Output "DS_SUITE_OUT=$OutputPath"
+if ($Look) {
+    $py = (Get-Command python -ErrorAction SilentlyContinue)
+    if ($py) { & $py.Source (Join-Path $PSScriptRoot 'look.py') $OutputPath --sheet | Select-Object -First 20 }
+    else { Write-Output 'look.py: python no encontrado' }
+}
 exit $exit

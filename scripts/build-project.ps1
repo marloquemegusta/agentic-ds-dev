@@ -9,7 +9,14 @@ param(
     # Several variants (-Variant a,b,c) are built in parallel, one process each.
     [string[]]$Variant = @('default'),
     # Extra defines, e.g. -Define PERF_PROFILE=1 (passed as -DNAME=VALUE).
-    [string[]]$Define = @()
+    [string[]]$Define = @(),
+    # Recording build for a partial ROM: adds NITRO_TRACE=1 and the variant's
+    # "ldflags" (e.g. -Wl,--wrap=fopen). Own tree: <variant>-trace.
+    [switch]$NitroTrace,
+    # Partial ROM: the copy item whose destination is 'nitrofiles' only takes the
+    # files listed here (one path relative to nitrofiles/ per line, # comments).
+    # Own tree and output: <rom>-<variant>-parcial.nds.
+    [string]$NitroList
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,6 +34,7 @@ if ($Variant.Count -eq 0) { $Variant = @('default') }
 if ($Variant.Count -gt 1) {
     if ($OutputRom) { throw '-OutputRom no se puede combinar con varias variantes.' }
     if ($Define.Count -gt 0) { throw '-Define no se puede combinar con varias variantes.' }
+    if ($NitroTrace -or $NitroList) { throw '-NitroTrace/-NitroList no se pueden combinar con varias variantes.' }
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("dsbuild-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     $jobs = foreach ($v in $Variant) {
@@ -61,7 +69,19 @@ if (-not (Test-Path -LiteralPath $template)) { throw "Falta la plantilla de buil
 
 # Layout: .ds-game-dev/build/<variant>/ (tree), .ds-game-dev/build/out/ (sidecars).
 $buildBase = Join-Path $project '.ds-game-dev\build'
-$buildRoot = Join-Path $buildBase $Variant
+# Tree/container name and ROM suffix; the config lookup keeps using $Variant.
+$treeName = $Variant
+$romSuffix = if ($Variant -eq 'default') { '' } else { $Variant }
+if ($NitroTrace -and $NitroList) { throw '-NitroTrace y -NitroList son excluyentes.' }
+if ($NitroTrace) { $treeName = "$Variant-trace"; $romSuffix = $treeName }
+$nitroOnly = $null
+if ($NitroList) {
+    $treeName = "$Variant-parcial"; $romSuffix = $treeName
+    if (-not (Test-Path -LiteralPath $NitroList)) { throw "Falta la lista de archivos: $NitroList" }
+    $nitroOnly = @(Get-Content -LiteralPath $NitroList | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') } |
+        ForEach-Object { $_.Replace('\', '/').TrimStart('/') } | Select-Object -Unique)
+}
+$buildRoot = Join-Path $buildBase $treeName
 $outDir = Join-Path $buildBase 'out'
 if (Test-Path -LiteralPath (Join-Path $buildBase 'Makefile')) {
     # Old flat layout: wipe it once (everything here is gitignored build output).
@@ -77,6 +97,17 @@ if ($config.variants -and $config.variants.PSObject.Properties[$Variant]) {
     foreach ($d in @($config.variants.$Variant.defines)) { if ($d) { $defineList.Add("$d") } }
 }
 foreach ($d in $Define) { if ($d) { $defineList.Add("$d") } }
+if ($NitroTrace) { $defineList.Add('NITRO_TRACE=1') }
+# Link flags (only -NitroTrace builds use them: --wrap): project-wide "ldflags", then the variant's.
+$ldflags = ''
+if ($NitroTrace) {
+    $ldList = New-Object System.Collections.Generic.List[string]
+    if ($config.PSObject.Properties['ldflags']) { foreach ($f in @($config.ldflags)) { if ($f) { $ldList.Add("$f") } } }
+    if ($config.variants -and $config.variants.PSObject.Properties[$Variant] -and $config.variants.$Variant.PSObject.Properties['ldflags']) {
+        foreach ($f in @($config.variants.$Variant.ldflags)) { if ($f) { $ldList.Add("$f") } }
+    }
+    $ldflags = $ldList -join ' '
+}
 $cflags = ($defineList | ForEach-Object { if ($_.StartsWith('-')) { $_ } else { "-D$_" } }) -join ' '
 
 # Native commands write to stderr on failure; under 'Stop' Windows PowerShell
@@ -99,7 +130,7 @@ Write-Trace 'docker-checks'
 # make's dependency files changes (template, project contract, image, defines).
 $templateHash = Get-ChildItem -LiteralPath $template -Recurse -File | Sort-Object FullName |
     ForEach-Object { $_.FullName.Substring($template.Length) + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
-$stampText = (@("image=$imageId", "variant=$Variant", "cflags=$cflags",
+$stampText = (@("image=$imageId", "variant=$treeName", "cflags=$cflags", "ldflags=$ldflags", "nitro=$(if ($nitroOnly) { ($nitroOnly -join ',') } else { '' })",
     "config=$((Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash)") + $templateHash) -join "`n"
 $stampPath = Join-Path $buildRoot '.ds-build-stamp'
 $previousStamp = if (Test-Path -LiteralPath $stampPath) { Get-Content -Raw -LiteralPath $stampPath } else { $null }
@@ -140,12 +171,23 @@ function Sync-File([string]$Source, [string]$Destination) {
     $script:synced++
 }
 # Mirror a directory: sync every file and drop files no longer in the source.
-function Sync-Tree([string]$Source, [string]$Destination) {
+function Sync-Tree([string]$Source, [string]$Destination, [string[]]$Only = $null) {
     $wanted = @{}
-    foreach ($file in Get-ChildItem -LiteralPath $Source -Recurse -File -Force) {
-        $target = Join-Path $Destination $file.FullName.Substring($Source.Length).TrimStart('\')
-        $wanted[$target] = $true
-        Sync-File $file.FullName $target
+    if ($null -ne $Only) {
+        # Partial copy: only the listed files, which must exist.
+        $missing = @($Only | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Source $_) -PathType Leaf) })
+        if ($missing.Count -gt 0) { throw ("NitroList: no existen en $Source -> " + ($missing -join ', ')) }
+        foreach ($rel in $Only) {
+            $target = Join-Path $Destination $rel.Replace('/', '\')
+            $wanted[$target] = $true
+            Sync-File (Join-Path $Source $rel) $target
+        }
+    } else {
+        foreach ($file in Get-ChildItem -LiteralPath $Source -Recurse -File -Force) {
+            $target = Join-Path $Destination $file.FullName.Substring($Source.Length).TrimStart('\')
+            $wanted[$target] = $true
+            Sync-File $file.FullName $target
+        }
     }
     if (Test-Path -LiteralPath $Destination) {
         foreach ($file in Get-ChildItem -LiteralPath $Destination -Recurse -File -Force) {
@@ -167,7 +209,10 @@ function Sync-All {
     foreach ($item in $config.copy) {
         $source = (Resolve-Path -LiteralPath (Join-Path $project $item.source)).Path
         $destination = Join-Path $buildRoot $item.destination
-        if (Test-Path -LiteralPath $source -PathType Container) { Sync-Tree $source $destination }
+        if (Test-Path -LiteralPath $source -PathType Container) {
+            if ($nitroOnly -and $item.destination -eq 'nitrofiles') { Sync-Tree $source $destination $nitroOnly }
+            else { Sync-Tree $source $destination }
+        }
         else { Sync-File $source $destination }
     }
     if ($config.icon) {
@@ -218,14 +263,15 @@ if ($config.subtitle) { $env:DS_GAME_SUBTITLE = Format-MakeShellValue "$($config
 if ($config.author)   { $env:DS_GAME_AUTHOR = Format-MakeShellValue "$($config.author)";     $makeVars += ' GAME_AUTHOR=\"$DS_GAME_AUTHOR\"' }
 if ($config.icon)     { $makeVars += ' GAME_ICON=ds-game-icon.png' }
 $env:CFLAGS = $cflags
+if ($ldflags) { $env:LDFLAGS = $ldflags }
 
 # The real build tree lives in a named Docker volume (ext4 inside the Docker
 # VM): make's stat/.d traffic over the Windows bind mount was ~8 s per run.
 # The Windows tree only holds the synced sources, index and stamp. Changed
 # files are streamed into the volume as a tar; outputs are copied back.
 $pathHash = [BitConverter]::ToString([Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($project.ToLowerInvariant()))).Replace('-', '').Substring(0, 10).ToLowerInvariant()
-$volName = "dsbuild-$pathHash-$Variant"
-$ctrName = "dsb-$pathHash-$Variant"
+$volName = "dsbuild-$pathHash-$treeName"
+$ctrName = "dsb-$pathHash-$treeName"
 $logPath = Join-Path $buildRoot 'build.log'
 $logLines = New-Object System.Collections.Generic.List[string]
 $makeExit = 1
@@ -273,7 +319,7 @@ try {
     }
     Write-Trace 'pushed'
     [IO.File]::WriteAllText($markerPath, $ctrId, (New-Object System.Text.UTF8Encoding($false)))
-    $dockerArgs = @('exec', '-e', 'CFLAGS', '-e', 'DS_GAME_TITLE', '-e', 'DS_GAME_SUBTITLE', '-e', 'DS_GAME_AUTHOR',
+    $dockerArgs = @('exec', '-e', 'CFLAGS', '-e', 'LDFLAGS', '-e', 'DS_GAME_TITLE', '-e', 'DS_GAME_SUBTITLE', '-e', 'DS_GAME_AUTHOR',
         '-w', '/source', $ctrName, 'sh', '-c', ('make -j$(nproc) -Otarget' + $makeVars + ' && mkdir -p /out/build && cp -f "' + $config.outputRom + '" /out/ && cp -f build/*.elf build/*.map /out/build/'))
     [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
     & docker @dockerArgs 2>&1 | ForEach-Object { $logLines.Add("$_") }
@@ -283,7 +329,7 @@ try {
 } finally {
     [Console]::OutputEncoding = $previousEncoding
     $ErrorActionPreference = 'Stop'
-    Remove-Item Env:\CFLAGS, Env:\DS_GAME_TITLE, Env:\DS_GAME_SUBTITLE, Env:\DS_GAME_AUTHOR -ErrorAction SilentlyContinue
+    Remove-Item Env:\CFLAGS, Env:\LDFLAGS, Env:\DS_GAME_TITLE, Env:\DS_GAME_SUBTITLE, Env:\DS_GAME_AUTHOR -ErrorAction SilentlyContinue
     $mutex.ReleaseMutex()
     $mutex.Dispose()
 }
@@ -356,8 +402,8 @@ $destinationRom = if ($OutputRom) {
     if ([IO.Path]::IsPathRooted($OutputRom)) { $OutputRom } else { Join-Path $project $OutputRom }
 } else {
     $base = Get-DsRomPath $config $project
-    if ($Variant -eq 'default') { $base }
-    else { Join-Path (Split-Path -Parent $base) ("{0}-{1}.nds" -f [IO.Path]::GetFileNameWithoutExtension($base), $Variant) }
+    if (-not $romSuffix) { $base }
+    else { Join-Path (Split-Path -Parent $base) ("{0}-{1}.nds" -f [IO.Path]::GetFileNameWithoutExtension($base), $romSuffix) }
 }
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationRom) | Out-Null
 Copy-Item -LiteralPath $built -Destination $destinationRom -Force
@@ -380,6 +426,8 @@ $info = [ordered]@{
     rom = $destinationRom
     romSha256 = (Get-FileHash -LiteralPath $destinationRom -Algorithm SHA256).Hash.ToLowerInvariant()
     variant = $Variant
+    tree = $treeName
+    nitroFiles = $(if ($nitroOnly) { $nitroOnly.Count } else { $null })
     builtAt = (Get-Date).ToUniversalTime().ToString('o')
     image = $image
     imageId = "$imageId".Trim()

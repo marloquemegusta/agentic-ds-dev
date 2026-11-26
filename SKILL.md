@@ -40,6 +40,8 @@ offline run). Setup details: `README.md`.
 | `fetch-device-log.ps1` | `-ProjectPath -RemoteFile /x.log [-OutDir] [-Delete]`; `DEVICE_LOG_RESULT=` |
 | `setup.ps1`, `build-runtime.ps1` | Install / rebuild the DeSmuME runtime (`README.md`, `references/desmume-agent.md`) |
 
+`build-partial-rom.ps1` builds a ROM with only the `nitrofiles` a scenario opens, to upload fast (`references/partial-rom.md`).
+
 `run-scenario(s)` and `upload-rom.ps1` default the ROM to `project.json` `rom`. Always invoke PowerShell scripts with `powershell -NonInteractive -ExecutionPolicy Bypass -File ...` so a missing parameter fails fast instead of hanging on stdin. Exit codes: 0 pass, 1 fail or no assertions, 2 error. Scenario format: `references/scenario-format.md`.
 The first WSL call can cost ~30 s (cold start); the scripts keep WSL warm after that.
 

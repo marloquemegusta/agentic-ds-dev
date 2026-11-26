@@ -10,13 +10,12 @@ param(
     [string[]]$Variant = @('default'),
     # Extra defines, e.g. -Define PERF_PROFILE=1 (passed as -DNAME=VALUE).
     [string[]]$Define = @(),
-    # Recording build for a partial ROM: adds NITRO_TRACE=1 and the variant's
-    # "ldflags" (e.g. -Wl,--wrap=fopen). Own tree: <variant>-trace.
+    # Partial ROM, see references/partial-rom.md. -Contract <file>: nitrofiles/ only gets the files of the
+    # concepts the contract lists (catalogo.json next to it) and the build carries the nitro probe.
+    # Own tree and output: <rom>-<variant>-<contract>.nds. -NitroTrace: probe build with the full nitrofiles/
+    # (tree <variant>-trace), used by build-partial-rom.ps1 -Record.
     [switch]$NitroTrace,
-    # Partial ROM: the copy item whose destination is 'nitrofiles' only takes the
-    # files listed here (one path relative to nitrofiles/ per line, # comments).
-    # Own tree and output: <rom>-<variant>-parcial.nds.
-    [string]$NitroList
+    [string]$Contract
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,7 +33,7 @@ if ($Variant.Count -eq 0) { $Variant = @('default') }
 if ($Variant.Count -gt 1) {
     if ($OutputRom) { throw '-OutputRom no se puede combinar con varias variantes.' }
     if ($Define.Count -gt 0) { throw '-Define no se puede combinar con varias variantes.' }
-    if ($NitroTrace -or $NitroList) { throw '-NitroTrace/-NitroList no se pueden combinar con varias variantes.' }
+    if ($NitroTrace -or $Contract) { throw '-NitroTrace/-Contract no se pueden combinar con varias variantes.' }
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("dsbuild-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     $jobs = foreach ($v in $Variant) {
@@ -72,15 +71,20 @@ $buildBase = Join-Path $project '.ds-game-dev\build'
 # Tree/container name and ROM suffix; the config lookup keeps using $Variant.
 $treeName = $Variant
 $romSuffix = if ($Variant -eq 'default') { '' } else { $Variant }
-if ($NitroTrace -and $NitroList) { throw '-NitroTrace y -NitroList son excluyentes.' }
+if ($NitroTrace -and $Contract) { throw '-NitroTrace y -Contract son excluyentes.' }
+. (Join-Path $PSScriptRoot 'partial\partial-common.ps1')
 if ($NitroTrace) { $treeName = "$Variant-trace"; $romSuffix = $treeName }
 $nitroOnly = $null
-if ($NitroList) {
-    $treeName = "$Variant-parcial"; $romSuffix = $treeName
-    if (-not (Test-Path -LiteralPath $NitroList)) { throw "Falta la lista de archivos: $NitroList" }
-    $nitroOnly = @(Get-Content -LiteralPath $NitroList | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') } |
-        ForEach-Object { $_.Replace('\', '/').TrimStart('/') } | Select-Object -Unique)
+if ($Contract) {
+    $resolved = Resolve-PartialContract $Contract (Join-Path $project 'nitrofiles')
+    $treeName = "$Variant-$($resolved.Name)"
+    $romSuffix = $treeName
+    $nitroOnly = @($resolved.Files)
+    Write-Output "PARTIAL_CONTRACT name=$($resolved.Name) concepts=$($resolved.Concepts -join ',') files=$($nitroOnly.Count)"
 }
+# Partial ROMs (contract or trace) carry the nitro probe: it is copied into the build tree and fopen/open wrapped.
+$probeSource = Join-Path (Join-Path $PSScriptRoot 'partial') 'nitro_probe.c'
+$withProbe = [bool]($NitroTrace -or $Contract)
 $buildRoot = Join-Path $buildBase $treeName
 $outDir = Join-Path $buildBase 'out'
 if (Test-Path -LiteralPath (Join-Path $buildBase 'Makefile')) {
@@ -97,17 +101,7 @@ if ($config.variants -and $config.variants.PSObject.Properties[$Variant]) {
     foreach ($d in @($config.variants.$Variant.defines)) { if ($d) { $defineList.Add("$d") } }
 }
 foreach ($d in $Define) { if ($d) { $defineList.Add("$d") } }
-if ($NitroTrace) { $defineList.Add('NITRO_TRACE=1') }
-# Link flags (only -NitroTrace builds use them: --wrap): project-wide "ldflags", then the variant's.
-$ldflags = ''
-if ($NitroTrace) {
-    $ldList = New-Object System.Collections.Generic.List[string]
-    if ($config.PSObject.Properties['ldflags']) { foreach ($f in @($config.ldflags)) { if ($f) { $ldList.Add("$f") } } }
-    if ($config.variants -and $config.variants.PSObject.Properties[$Variant] -and $config.variants.$Variant.PSObject.Properties['ldflags']) {
-        foreach ($f in @($config.variants.$Variant.ldflags)) { if ($f) { $ldList.Add("$f") } }
-    }
-    $ldflags = $ldList -join ' '
-}
+$ldflags = if ($withProbe) { '-Wl,--wrap=fopen -Wl,--wrap=open' } else { '' }
 $cflags = ($defineList | ForEach-Object { if ($_.StartsWith('-')) { $_ } else { "-D$_" } }) -join ' '
 
 # Native commands write to stderr on failure; under 'Stop' Windows PowerShell
@@ -130,7 +124,7 @@ Write-Trace 'docker-checks'
 # make's dependency files changes (template, project contract, image, defines).
 $templateHash = Get-ChildItem -LiteralPath $template -Recurse -File | Sort-Object FullName |
     ForEach-Object { $_.FullName.Substring($template.Length) + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
-$stampText = (@("image=$imageId", "variant=$treeName", "cflags=$cflags", "ldflags=$ldflags", "nitro=$(if ($nitroOnly) { ($nitroOnly -join ',') } else { '' })",
+$stampText = (@("image=$imageId", "variant=$treeName", "cflags=$cflags", "ldflags=$ldflags", "probe=$(if ($withProbe) { (Get-FileHash -LiteralPath $probeSource -Algorithm SHA256).Hash } else { '' })", "nitro=$(if ($nitroOnly) { ($nitroOnly -join ',') } else { '' })",
     "config=$((Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash)") + $templateHash) -join "`n"
 $stampPath = Join-Path $buildRoot '.ds-build-stamp'
 $previousStamp = if (Test-Path -LiteralPath $stampPath) { Get-Content -Raw -LiteralPath $stampPath } else { $null }
@@ -171,12 +165,13 @@ function Sync-File([string]$Source, [string]$Destination) {
     $script:synced++
 }
 # Mirror a directory: sync every file and drop files no longer in the source.
+$extraKeep = @{}
 function Sync-Tree([string]$Source, [string]$Destination, [string[]]$Only = $null) {
     $wanted = @{}
     if ($null -ne $Only) {
         # Partial copy: only the listed files, which must exist.
         $missing = @($Only | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Source $_) -PathType Leaf) })
-        if ($missing.Count -gt 0) { throw ("NitroList: no existen en $Source -> " + ($missing -join ', ')) }
+        if ($missing.Count -gt 0) { throw ("Contrato: no existen en $Source -> " + ($missing -join ', ')) }
         foreach ($rel in $Only) {
             $target = Join-Path $Destination $rel.Replace('/', '\')
             $wanted[$target] = $true
@@ -191,7 +186,7 @@ function Sync-Tree([string]$Source, [string]$Destination, [string[]]$Only = $nul
     }
     if (Test-Path -LiteralPath $Destination) {
         foreach ($file in Get-ChildItem -LiteralPath $Destination -Recurse -File -Force) {
-            if (-not $wanted.ContainsKey($file.FullName)) {
+            if (-not $wanted.ContainsKey($file.FullName) -and -not $extraKeep.ContainsKey($file.FullName)) {
                 Remove-Item -LiteralPath $file.FullName -Force
                 $index.Remove($file.FullName)
                 [void]$script:changed.Remove($file.FullName)
@@ -205,6 +200,11 @@ function Sync-All {
     $script:inputsNewest = [DateTime]::MinValue
     foreach ($file in Get-ChildItem -LiteralPath $template -Recurse -File -Force) {
         Sync-File $file.FullName (Join-Path $buildRoot $file.FullName.Substring($template.Length).TrimStart('\'))
+    }
+    if ($withProbe) {
+        $probeTarget = Join-Path (Join-Path (Join-Path $buildRoot 'arm9') 'source') 'nitro_probe.c'
+        $extraKeep[$probeTarget] = $true
+        Sync-File $probeSource $probeTarget
     }
     foreach ($item in $config.copy) {
         $source = (Resolve-Path -LiteralPath (Join-Path $project $item.source)).Path
